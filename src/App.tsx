@@ -44,6 +44,9 @@ import {
   Wifi,
   Radio,
   Smartphone,
+  House,
+  SquareCheckBig,
+  ScanBarcode,
 } from 'lucide-react';
 import { useSyncedAppData } from './sync/useSyncedAppData';
 import { SyncBanner, SyncHeaderButton, SyncSettingsPanel } from './components/SyncUi';
@@ -481,48 +484,22 @@ const QUICK_PICK_IDS = [
 // ============================================================================
 
 /**
- * Beautiful UI SpotlightCard:
- * Renders a dark glassmorphic Zinc-900/75 surface with 1px border-zinc-800/80
- * and a dynamic pointer-tracking radial spotlight glow on hover.
+ * Karte im Design „Graphite & Lime“: flache Graphite-Fläche mit feinem Rand,
+ * ohne Glas-Effekt und ohne Glow. `spotlightColor` wird aus Kompatibilität
+ * angenommen, aber nicht mehr verwendet.
  */
 function SpotlightCard({
   children,
   className = '',
-  spotlightColor = 'rgba(16, 185, 129, 0.085)',
+  spotlightColor: _spotlightColor,
   ...props
 }) {
-  const cardRef = useRef(null);
-  const [coords, setCoords] = useState({ x: 0, y: 0 });
-  const [isHovered, setIsHovered] = useState(false);
-
-  const handleMouseMove = (e) => {
-    if (!cardRef.current) return;
-    const rect = cardRef.current.getBoundingClientRect();
-    setCoords({
-      x: e.clientX - rect.left,
-      y: e.clientY - rect.top,
-    });
-  };
-
   return (
     <div
-      ref={cardRef}
-      onMouseMove={handleMouseMove}
-      onMouseEnter={() => setIsHovered(true)}
-      onMouseLeave={() => setIsHovered(false)}
-      className={`relative overflow-hidden rounded-2xl bg-zinc-900/75 border border-zinc-800/80 backdrop-blur-md shadow-[0_1px_0_0_rgba(255,255,255,0.03)_inset,0_12px_32px_-12px_rgba(0,0,0,0.65)] transition-colors duration-200 hover:border-zinc-700/80 ${className}`}
+      className={`relative overflow-hidden rounded-2xl bg-zinc-900 border border-zinc-800 ${className}`}
       {...props}
     >
-      {/* Beautiful UI Pointer Spotlight Overlay */}
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute -inset-px rounded-2xl transition-opacity duration-300"
-        style={{
-          opacity: isHovered ? 1 : 0,
-          background: `radial-gradient(460px circle at ${coords.x}px ${coords.y}px, ${spotlightColor}, transparent 75%)`,
-        }}
-      />
-      <div className="relative z-10">{children}</div>
+      {children}
     </div>
   );
 }
@@ -543,7 +520,7 @@ function Button({
 
   const variants = {
     primary:
-      'bg-emerald-500 text-zinc-950 font-semibold hover:bg-emerald-400 shadow-[0_0_20px_-5px_rgba(16,185,129,0.45)]',
+      'bg-emerald-500 text-zinc-950 font-semibold hover:bg-emerald-400',
     secondary:
       'bg-zinc-800/90 text-zinc-100 hover:bg-zinc-700/85 border border-zinc-700/70',
     outline:
@@ -656,10 +633,11 @@ function SegmentedTabs({ items, value, onValueChange, className = '' }) {
 function ProgressBar({ value = 0, color = 'emerald', height = 'md', className = '' }) {
   const clamped = Math.max(0, Math.min(100, value));
   const colors = {
-    emerald: 'bg-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.4)]',
-    amber: 'bg-amber-500 shadow-[0_0_12px_rgba(245,158,11,0.3)]',
-    sky: 'bg-sky-400 shadow-[0_0_12px_rgba(56,189,248,0.3)]',
-    rose: 'bg-rose-500 shadow-[0_0_12px_rgba(244,63,94,0.4)]',
+    emerald: 'bg-emerald-400',
+    light: 'bg-zinc-100',
+    amber: 'bg-amber-500',
+    sky: 'bg-sky-400',
+    rose: 'bg-rose-500',
   };
   const heights = {
     sm: 'h-1.5',
@@ -797,15 +775,15 @@ function SonnerToast({ toast, onUndo, onDismiss }) {
     <div
       role="status"
       aria-live="polite"
-      className="fixed bottom-4 right-4 z-50 w-[calc(100%-2rem)] sm:w-auto sm:min-w-[320px] sm:max-w-md"
+      className="fixed bottom-28 sm:bottom-4 right-4 z-50 w-[calc(100%-2rem)] sm:w-auto sm:min-w-[320px] sm:max-w-md"
     >
       <div className="flex items-center justify-between gap-3 rounded-2xl bg-zinc-900/95 border border-zinc-800 backdrop-blur-xl px-4 py-3 shadow-[0_16px_40px_-8px_rgba(0,0,0,0.85)]">
         <div className="flex items-center gap-2.5 min-w-0">
           <span
             className={`h-2 w-2 rounded-full shrink-0 ${
               toast.accent === 'amber'
-                ? 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.6)]'
-                : 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)]'
+                ? 'bg-amber-400'
+                : 'bg-emerald-400'
             }`}
           />
           <span className="text-xs sm:text-[13px] font-medium text-zinc-100 truncate">
@@ -1284,7 +1262,7 @@ function BarcodeScannerModal({ open, onOpenChange, onBarcodeDetected }) {
               <>
                 <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-6">
                   <div className="w-full max-w-[300px] h-32 rounded-xl border-2 border-emerald-400/80 shadow-[0_0_0_9999px_rgba(9,9,11,0.45)] relative overflow-hidden">
-                    <div className="absolute inset-x-2 top-1/2 h-0.5 bg-emerald-400/80 shadow-[0_0_10px_#34d399] animate-pulse" />
+                    <div className="absolute inset-x-2 top-1/2 h-0.5 bg-emerald-400/80 animate-pulse" />
                   </div>
                 </div>
                 <div className="pointer-events-none absolute bottom-2 inset-x-0 text-center text-[11px] font-medium text-zinc-200 drop-shadow">
@@ -3204,23 +3182,85 @@ export default function App() {
   };
 
   return (
-    <div className="relative min-h-screen bg-zinc-950 text-zinc-100 font-sans antialiased selection:bg-emerald-500/30 selection:text-emerald-200 pb-24">
-      {/* Subtiler Emerald-Ambient-Glow oben (Beautiful UI Layer) */}
-      <div
-        aria-hidden="true"
-        className="pointer-events-none fixed inset-x-0 top-0 h-[420px] z-0 overflow-hidden"
-      >
-        <div className="mx-auto max-w-5xl h-full bg-[radial-gradient(ellipse_70%_50%_at_50%_-10%,rgba(16,185,129,0.12),transparent_75%)]" />
-      </div>
+    <div className="relative min-h-screen bg-zinc-950 text-zinc-100 font-sans antialiased selection:bg-emerald-500/30 selection:text-emerald-200 pb-36 sm:pb-24 lg:pl-60">
+      {/* ==================================================================== */}
+      {/* SEITENLEISTE (nur PC, ab lg)                                         */}
+      {/* ==================================================================== */}
+      <aside className="hidden lg:flex fixed inset-y-0 left-0 z-40 w-60 flex-col gap-8 px-5 py-8 border-r border-zinc-800/70 bg-zinc-950">
+        <div className="flex items-center gap-2.5 px-2">
+          <div className="w-7 h-7 rounded-[9px] bg-emerald-400 text-zinc-950 flex items-center justify-center">
+            <Zap className="w-4 h-4" strokeWidth={2.4} />
+          </div>
+          <span className="text-[15px] font-semibold tracking-tight">Health Tracker</span>
+        </div>
+
+        <nav aria-label="Hauptnavigation" className="flex flex-col gap-1">
+          {[
+            {
+              key: 'daily',
+              label: 'Kalorien & Habits',
+              icon: House,
+              active: activeView === 'daily',
+              onClick: () => setActiveView('daily'),
+            },
+            {
+              key: 'weight',
+              label: 'Gewicht',
+              icon: TrendingUp,
+              active: activeView === 'weight',
+              onClick: () => setActiveView('weight'),
+            },
+            {
+              key: 'scan',
+              label: 'Barcode scannen',
+              icon: ScanBarcode,
+              active: false,
+              onClick: () => setIsScannerOpen(true),
+            },
+            {
+              key: 'goals',
+              label: 'Ziele & Backup',
+              icon: Target,
+              active: false,
+              onClick: () => setIsSettingsOpen(true),
+            },
+          ].map((item) => {
+            const Icon = item.icon;
+            return (
+              <button
+                key={item.key}
+                type="button"
+                onClick={item.onClick}
+                aria-current={item.active ? 'page' : undefined}
+                className={`h-11 px-3 rounded-xl flex items-center gap-3 text-sm font-medium text-left transition ${
+                  item.active
+                    ? 'bg-zinc-900 text-zinc-100'
+                    : 'text-zinc-400 hover:text-zinc-100 hover:bg-zinc-900/60'
+                }`}
+              >
+                <Icon
+                  className={`w-[18px] h-[18px] shrink-0 ${item.active ? 'text-emerald-400' : ''}`}
+                  strokeWidth={1.8}
+                />
+                {item.label}
+              </button>
+            );
+          })}
+        </nav>
+
+        <div className="mt-auto px-2 text-[11px] leading-relaxed text-zinc-500">
+          Lebensmittel: BLS &amp; Open Food Facts
+        </div>
+      </aside>
 
       {/* ==================================================================== */}
       {/* KOMPAKTER STICKY HEADER & DATUMS-NAVIGATION                          */}
       {/* ==================================================================== */}
       <header className="sticky top-0 z-30 bg-zinc-950/80 backdrop-blur-xl border-b border-zinc-800/80">
         <div className="max-w-6xl mx-auto px-3 sm:px-6 h-16 flex items-center justify-between gap-2">
-          {/* App-Branding */}
-          <div className="flex items-center gap-2.5 shrink-0">
-            <div className="w-8 h-8 rounded-xl bg-zinc-900 border border-zinc-800 flex items-center justify-center shadow-[0_0_20px_-4px_rgba(16,185,129,0.35)]">
+          {/* App-Branding (Handy: ausgeblendet, PC: steht in der Seitenleiste) */}
+          <div className="hidden sm:flex lg:hidden items-center gap-2.5 shrink-0">
+            <div className="w-8 h-8 rounded-xl bg-zinc-900 border border-zinc-800 flex items-center justify-center">
               <Zap className="w-4 h-4 text-emerald-400" />
             </div>
             <div className="hidden sm:block">
@@ -3332,6 +3372,7 @@ export default function App() {
               size="sm"
               onClick={() => setIsSettingsOpen(true)}
               aria-label="Ziele & Backup öffnen"
+              className="hidden sm:inline-flex lg:hidden"
             >
               <Settings className="w-3.5 h-3.5 text-zinc-300" />
               <span className="hidden sm:inline">Ziele & Backup</span>
@@ -3347,11 +3388,11 @@ export default function App() {
       {/* ==================================================================== */}
       <main className="relative z-10 max-w-6xl mx-auto px-3 sm:px-6 pt-4 sm:pt-6 space-y-5">
         {/* Obere Navigationsleiste: Hauptansicht & 1-Klick Schnell-Waage */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between lg:justify-end gap-2.5">
           <SegmentedTabs
             value={activeView}
             onValueChange={setActiveView}
-            className="w-full sm:w-auto"
+            className="hidden sm:inline-flex lg:hidden sm:w-auto"
             items={[
               {
                 value: 'daily',
@@ -3575,13 +3616,13 @@ export default function App() {
                   {/* Kohlenhydrate */}
                   <div className="p-3 rounded-xl bg-zinc-950/60 border border-zinc-800/80 space-y-2">
                     <div className="flex items-center justify-between gap-1 text-xs">
-                      <span className="font-semibold text-amber-400">Kohlenhydrate</span>
+                      <span className="font-semibold text-zinc-200">Kohlenhydrate</span>
                       <span className="tabular-nums text-zinc-300">
                         <strong>{Math.round(totals.carbs * 10) / 10}g</strong>
                         <span className="text-zinc-500"> / {appData.targets.carbs}g</span>
                       </span>
                     </div>
-                    <ProgressBar value={carbsPct} color="amber" height="sm" />
+                    <ProgressBar value={carbsPct} color="light" height="sm" />
                     <div className="flex items-center justify-between text-[11px] text-zinc-500 tabular-nums">
                       <span>{carbsPctRaw}%</span>
                       <span>
@@ -4799,7 +4840,7 @@ export default function App() {
                                   <span
                                     className={`w-full h-1.5 rounded-full transition ${
                                       checkedOnDay
-                                        ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]'
+                                        ? 'bg-emerald-400'
                                         : 'bg-zinc-800 group-hover:bg-zinc-700'
                                     }`}
                                   />
@@ -4893,7 +4934,7 @@ export default function App() {
                                         : isOverTarget
                                         ? 'bg-rose-500/80'
                                         : isSelected
-                                        ? 'bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.45)]'
+                                        ? 'bg-emerald-400'
                                         : 'bg-emerald-500/55 group-hover:bg-emerald-400/80'
                                     }`}
                                   />
@@ -5442,6 +5483,89 @@ export default function App() {
           </section>
         )}
       </main>
+
+      {/* ==================================================================== */}
+      {/* MOBILE NAVIGATION UNTEN (nur Handy)                                  */}
+      {/* ==================================================================== */}
+      <nav
+        aria-label="Hauptnavigation"
+        className="sm:hidden fixed inset-x-4 z-40 bottom-[calc(1rem+env(safe-area-inset-bottom))] h-[68px] px-1.5 flex items-center justify-around rounded-[24px] bg-zinc-900/95 backdrop-blur-xl border border-zinc-800"
+      >
+        {[
+          {
+            key: 'today',
+            label: 'Heute',
+            icon: House,
+            active: activeView === 'daily' && mobileSection !== 'habits',
+            onClick: () => {
+              setActiveView('daily');
+              setMobileSection('all');
+              window.scrollTo({ top: 0, behavior: 'smooth' });
+            },
+          },
+          {
+            key: 'habits',
+            label: 'Habits',
+            icon: SquareCheckBig,
+            active: activeView === 'daily' && mobileSection === 'habits',
+            onClick: () => {
+              setActiveView('daily');
+              setMobileSection('habits');
+              window.scrollTo({ top: 0, behavior: 'smooth' });
+            },
+          },
+          { key: 'scan' },
+          {
+            key: 'weight',
+            label: 'Gewicht',
+            icon: TrendingUp,
+            active: activeView === 'weight',
+            onClick: () => {
+              setActiveView('weight');
+              window.scrollTo({ top: 0, behavior: 'smooth' });
+            },
+          },
+          {
+            key: 'goals',
+            label: 'Ziele',
+            icon: Target,
+            active: false,
+            onClick: () => setIsSettingsOpen(true),
+          },
+        ].map((item) => {
+          if (item.key === 'scan') {
+            return (
+              <button
+                key="scan"
+                type="button"
+                onClick={() => setIsScannerOpen(true)}
+                aria-label="Barcode scannen"
+                className="w-14 h-14 rounded-[18px] bg-emerald-400 text-zinc-950 flex items-center justify-center active:scale-95 transition"
+              >
+                <ScanBarcode className="w-[22px] h-[22px]" strokeWidth={2} />
+              </button>
+            );
+          }
+          const Icon = item.icon;
+          return (
+            <button
+              key={item.key}
+              type="button"
+              onClick={item.onClick}
+              aria-current={item.active ? 'page' : undefined}
+              className={`w-[60px] h-[52px] flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition ${
+                item.active ? 'text-zinc-100' : 'text-zinc-400'
+              }`}
+            >
+              <Icon
+                className={`w-5 h-5 ${item.active ? 'text-emerald-400' : ''}`}
+                strokeWidth={1.8}
+              />
+              {item.label}
+            </button>
+          );
+        })}
+      </nav>
 
       {/* ==================================================================== */}
       {/* MODAL 1: ZIELE, GOOGLE DRIVE SYNC & DATENSICHERUNG                   */}
