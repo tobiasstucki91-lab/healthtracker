@@ -3,6 +3,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   Calendar,
   Plus,
   Trash2,
@@ -1728,6 +1729,15 @@ export default function App() {
 
   // Nahrungsmittel-Suche & Filter-Pills ('all' | 'basis' | 'off')
   const [searchQuery, setSearchQuery] = useState('');
+  const [showQuickPicks, setShowQuickPicks] = useState(() => {
+    try { return localStorage.getItem('hht_show_quick_picks') === '1'; } catch { return false; }
+  });
+  const toggleQuickPicks = () => {
+    setShowQuickPicks((v) => {
+      try { localStorage.setItem('hht_show_quick_picks', v ? '0' : '1'); } catch {}
+      return !v;
+    });
+  };
   const [sourceFilter, setSourceFilter] = useState('all');
   const [offResults, setOffResults] = useState([]);
   const [isSearchingOff, setIsSearchingOff] = useState(false);
@@ -3986,9 +3996,16 @@ export default function App() {
                       {/* Suchergebnisse oder Quick-Picks */}
                       {!searchQuery.trim() ? (
                         <div className="space-y-2">
-                          <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-                            Häufige Grundnahrungsmittel (1-Klick Rechner)
-                          </div>
+                          <button
+                            type="button"
+                            onClick={toggleQuickPicks}
+                            aria-expanded={showQuickPicks}
+                            className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500 hover:text-zinc-300 transition"
+                          >
+                            <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showQuickPicks ? '' : '-rotate-90'}`} />
+                            <span>Häufige Grundnahrungsmittel (1-Klick Rechner)</span>
+                          </button>
+                          {showQuickPicks && (
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                             {quickPickFoods.map((food) => (
                               <button
@@ -4013,6 +4030,7 @@ export default function App() {
                               </button>
                             ))}
                           </div>
+                          )}
                         </div>
                       ) : (
                         <div className="space-y-2">
