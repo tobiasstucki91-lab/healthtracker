@@ -31,7 +31,7 @@ export default defineConfig({
         maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
         // Google-Anmeldung & Drive-API nie aus dem Cache bedienen
         navigateFallbackDenylist: [/^\/oauth/],
-        // Schrift (Geist) offline verfügbar halten
+        // Schrift (Anonymous Pro) offline verfügbar halten
         runtimeCaching: [
           {
             urlPattern: /^https:\/\/fonts\.(googleapis|gstatic)\.com\/.*/i,

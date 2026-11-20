@@ -88,8 +88,10 @@ export default {
         rose: coral,
       },
       fontFamily: {
-        sans: ['Geist', 'Inter', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'sans-serif'],
-        mono: ['"Geist Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+        // Anonymous Pro (Monospace) für die ganze App; hat nur 400 und 700,
+        // font-medium wird daher normal, font-semibold fett dargestellt.
+        sans: ['"Anonymous Pro"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Consolas', 'monospace'],
+        mono: ['"Anonymous Pro"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Consolas', 'monospace'],
       },
       borderRadius: {
         xl: '0.875rem',
