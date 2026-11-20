@@ -935,60 +935,249 @@ async function decodeBarcodeFromImage(imgElement) {
 }
 
 /**
+ * Prüft die Prüfziffer von EAN-8, UPC-A (12), EAN-13 und GTIN-14.
+ */
+function isValidGtin(code) {
+  if (!/^(\d{8}|\d{12,14})$/.test(code)) return false;
+  const digits = code.split('').map(Number);
+  const check = digits.pop();
+  let sum = 0;
+  for (let i = digits.length - 1, w = 3; i >= 0; i--, w = w === 3 ? 1 : 3) {
+    sum += digits[i] * w;
+  }
+  return (10 - (sum % 10)) % 10 === check;
+}
+
+let nativeDetectorPromise = null;
+
+/** Nativer BarcodeDetector (Android Chrome), falls vorhanden – sonst null. */
+async function getNativeDetector() {
+  if (typeof window === 'undefined' || !('BarcodeDetector' in window)) return null;
+  if (!nativeDetectorPromise) {
+    nativeDetectorPromise = (async () => {
+      const wanted = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128'];
+      try {
+        const supported = await window.BarcodeDetector.getSupportedFormats();
+        const formats = wanted.filter((f) => supported.includes(f));
+        return formats.length ? new window.BarcodeDetector({ formats }) : null;
+      } catch {
+        return null;
+      }
+    })();
+  }
+  return nativeDetectorPromise;
+}
+
+/**
+ * Schneidet den mittleren Bereich des Kamerabilds (dort, wo der Zielrahmen ist)
+ * aus und dreht ihn optional um 90°, damit auch hochkant gehaltene Barcodes
+ * erkannt werden.
+ */
+function grabCenterCrop(video, rotate) {
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  if (!vw || !vh) return null;
+  const cropW = Math.round(vw * 0.9);
+  const cropH = Math.round(vh * (rotate ? 0.9 : 0.5));
+  const sx = Math.round((vw - cropW) / 2);
+  const sy = Math.round((vh - cropH) / 2);
+  const scale = Math.min(1, 1000 / Math.max(cropW, cropH));
+  const w = Math.round(cropW * scale);
+  const h = Math.round(cropH * scale);
+  const canvas = document.createElement('canvas');
+  canvas.width = rotate ? h : w;
+  canvas.height = rotate ? w : h;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (rotate) {
+    ctx.translate(canvas.width / 2, canvas.height / 2);
+    ctx.rotate(Math.PI / 2);
+    ctx.drawImage(video, sx, sy, cropW, cropH, -w / 2, -h / 2, w, h);
+  } else {
+    ctx.drawImage(video, sx, sy, cropW, cropH, 0, 0, w, h);
+  }
+  return canvas;
+}
+
+/** Ein Erkennungsversuch auf dem aktuellen Videobild. */
+async function decodeVideoFrame(video, tick) {
+  const native = await getNativeDetector();
+  if (native) {
+    try {
+      const found = await native.detect(video);
+      const hit = found.find((b) => b.rawValue && /^\d{8,14}$/.test(b.rawValue.trim())) || found[0];
+      return hit?.rawValue?.trim() || null;
+    } catch {
+      return null;
+    }
+  }
+  const reader = await getZxingReader();
+  const canvas = grabCenterCrop(video, tick % 3 === 2);
+  if (!canvas) return null;
+  try {
+    return reader.decodeFromCanvas(canvas)?.getText?.()?.trim() || null;
+  } catch {
+    return null; // kein Barcode in diesem Bild
+  }
+}
+
+/**
  * BarcodeScannerModal:
- * Unterstützt direkte Foto-Aufnahme (mobil & desktop), Bild-Upload/Paste
- * sowie einen Live-Kamera-Scanner mit automatischer EAN-Erkennung.
+ * Öffnet direkt den Live-Scanner: Die Kamera läuft im Fenster und ein Barcode
+ * wird automatisch erkannt – ohne Foto und ohne Bestätigung. Die Kamera-
+ * Erlaubnis fragt der Browser nur beim ersten Mal ab. Foto/Bild und manuelle
+ * Eingabe bleiben als Ausweichweg.
  */
 function BarcodeScannerModal({ open, onOpenChange, onBarcodeDetected }) {
-  const [scanMode, setScanMode] = useState('photo'); // 'photo' | 'live'
+  const [scanMode, setScanMode] = useState('live'); // 'live' | 'photo'
   const [previewUrl, setPreviewUrl] = useState(null);
   const [isDecoding, setIsDecoding] = useState(false);
   const [scanError, setScanError] = useState(null);
   const [manualEan, setManualEan] = useState('');
-  const [isCameraActive, setIsCameraActive] = useState(false);
+  const [cameraState, setCameraState] = useState('idle'); // 'idle' | 'starting' | 'active' | 'error'
+  const [torchAvailable, setTorchAvailable] = useState(false);
+  const [torchOn, setTorchOn] = useState(false);
 
   const cameraCaptureInputRef = useRef(null);
   const galleryInputRef = useRef(null);
   const videoRef = useRef(null);
   const streamRef = useRef(null);
-  const scanLoopRef = useRef(null);
+  const sessionRef = useRef(0);
+  const onDetectedRef = useRef(onBarcodeDetected);
+  onDetectedRef.current = onBarcodeDetected;
 
-  const stopLiveCamera = () => {
-    if (scanLoopRef.current) {
-      clearInterval(scanLoopRef.current);
-      scanLoopRef.current = null;
-    }
+  const stopCamera = () => {
+    sessionRef.current += 1; // laufende Scan-Schleife & Kamerastart abbrechen
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
     }
-    setIsCameraActive(false);
+    if (videoRef.current) videoRef.current.srcObject = null;
+    setTorchAvailable(false);
+    setTorchOn(false);
+    setCameraState('idle');
   };
 
-  // Cleanup beim Schließen oder Moduswechsel
+  const startCamera = async () => {
+    stopCamera();
+    const session = sessionRef.current;
+    setScanError(null);
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setCameraState('error');
+      setScanError('Die Live-Kamera wird in diesem Browser nicht unterstützt. Nutze „Foto / Bild".');
+      return;
+    }
+
+    setCameraState('starting');
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          advanced: [{ focusMode: 'continuous' }],
+        },
+      });
+    } catch (err) {
+      if (session !== sessionRef.current) return;
+      setCameraState('error');
+      setScanError(
+        err?.name === 'NotAllowedError'
+          ? 'Kamerazugriff wurde verweigert. Erlaube ihn in Chrome über das Schloss-Symbol neben der Adresse (bzw. in der installierten App: lange auf das App-Symbol tippen → App-Info → Berechtigungen → Kamera). Bis dahin funktioniert „Foto / Bild".'
+          : 'Kamera konnte nicht gestartet werden. Ist sie in einer anderen App geöffnet? Alternativ „Foto / Bild" nutzen.'
+      );
+      return;
+    }
+
+    // Fenster wurde inzwischen geschlossen oder neu gestartet
+    if (session !== sessionRef.current) {
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+
+    streamRef.current = stream;
+    const track = stream.getVideoTracks()[0];
+    try {
+      setTorchAvailable(Boolean(track?.getCapabilities?.().torch));
+    } catch {
+      setTorchAvailable(false);
+    }
+
+    const video = videoRef.current;
+    if (video) {
+      video.srcObject = stream;
+      await video.play().catch(() => {});
+    }
+    if (session !== sessionRef.current) return;
+    setCameraState('active');
+
+    // Scan-Schleife: so schnell wie der Decoder es zulässt, ohne das Handy zu überlasten
+    let tick = 0;
+    let lastCode = null;
+    const loop = async () => {
+      if (session !== sessionRef.current) return;
+      const v = videoRef.current;
+      if (v && v.readyState >= 2) {
+        const code = await decodeVideoFrame(v, tick++);
+        if (session !== sessionRef.current) return;
+        // Gültige EAN/UPC sofort übernehmen, alles andere erst nach zweimaligem Lesen
+        if (code && (isValidGtin(code) || code === lastCode)) {
+          stopCamera();
+          onDetectedRef.current(code);
+          return;
+        }
+        lastCode = code;
+      }
+      setTimeout(loop, 120);
+    };
+    loop();
+  };
+
+  const toggleTorch = async () => {
+    const track = streamRef.current?.getVideoTracks()[0];
+    if (!track) return;
+    try {
+      await track.applyConstraints({ advanced: [{ torch: !torchOn }] });
+      setTorchOn(!torchOn);
+    } catch {
+      setTorchAvailable(false);
+    }
+  };
+
+  // Beim Öffnen sofort die Kamera starten, beim Schließen alles aufräumen
   useEffect(() => {
+    if (open && scanMode === 'live') {
+      startCamera();
+    } else {
+      stopCamera();
+    }
     if (!open) {
-      stopLiveCamera();
       setScanError(null);
       setIsDecoding(false);
       setManualEan('');
+      setScanMode('live');
       if (previewUrl) {
         URL.revokeObjectURL(previewUrl);
         setPreviewUrl(null);
       }
-      return;
     }
-
-    if (scanMode !== 'live') {
-      stopLiveCamera();
-    }
+    return () => stopCamera();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, scanMode]);
 
+  // Kamera freigeben, wenn die App in den Hintergrund geht; bei Rückkehr neu starten
   useEffect(() => {
-    return () => {
-      stopLiveCamera();
+    if (!open || scanMode !== 'live') return;
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') stopCamera();
+      else startCamera();
     };
-  }, []);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, scanMode]);
 
   // Foto-Datei verarbeiten & Barcode auslesen
   const processImageFile = async (file) => {
@@ -1025,79 +1214,6 @@ function BarcodeScannerModal({ open, onOpenChange, onBarcodeDetected }) {
     }
   };
 
-  // Live-Kamera starten & kontinuierlich Frames prüfen
-  const startLiveCamera = async () => {
-    setScanError(null);
-    stopLiveCamera();
-
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      setScanError(
-        'Live-Kamera wird in diesem Browser-Frame nicht unterstützt. Nutze stattdessen den Tab „Foto aufnehmen“.'
-      );
-      return;
-    }
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: { ideal: 'environment' },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-        },
-        audio: false,
-      });
-
-      streamRef.current = stream;
-      setIsCameraActive(true);
-
-      // Kurze Verzögerung bis <video> gemountet ist
-      setTimeout(() => {
-        if (videoRef.current && streamRef.current) {
-          videoRef.current.srcObject = streamRef.current;
-          videoRef.current.play().catch(() => {});
-        }
-      }, 60);
-
-      let busy = false;
-      scanLoopRef.current = setInterval(async () => {
-        if (busy || !videoRef.current || videoRef.current.readyState < 2) return;
-        busy = true;
-        try {
-          const code = await decodeBarcodeFromImage(videoRef.current);
-          if (code) {
-            stopLiveCamera();
-            onBarcodeDetected(code);
-          }
-        } finally {
-          busy = false;
-        }
-      }, 550);
-    } catch {
-      setScanError(
-        'Kamerazugriff blockiert oder nicht verfügbar. Wechsle auf „Foto aufnehmen“, um direkt ein Foto vom Barcode zu machen.'
-      );
-      setIsCameraActive(false);
-    }
-  };
-
-  // Aktuellen Frame aus Live-Kamera als Schnappschuss auswerten
-  const handleCaptureLiveFrame = async () => {
-    if (!videoRef.current || videoRef.current.readyState < 2) return;
-    setIsDecoding(true);
-    setScanError(null);
-    try {
-      const code = await decodeBarcodeFromImage(videoRef.current);
-      if (code) {
-        stopLiveCamera();
-        onBarcodeDetected(code);
-      } else {
-        setScanError('Auf diesem Frame wurde noch kein Barcode erkannt – halte ihn kurz ruhiger.');
-      }
-    } finally {
-      setIsDecoding(false);
-    }
-  };
-
   // Zwischenablage-Paste (z. B. Strg+V Foto am Desktop)
   const handlePaste = (e) => {
     const items = e.clipboardData?.items;
@@ -1127,40 +1243,93 @@ function BarcodeScannerModal({ open, onOpenChange, onBarcodeDetected }) {
       open={open}
       onOpenChange={onOpenChange}
       title="Barcode-Scanner"
-      description="Mache ein Foto vom Produkt-Barcode oder nutze den Live-Scanner."
+      description="Halte den Barcode in den Rahmen – er wird automatisch erkannt."
     >
       <div onPaste={handlePaste} className="p-5 space-y-4">
-        {/* Modus-Umschalter: Foto aufnehmen vs. Live-Kamera */}
         <SegmentedTabs
           value={scanMode}
           onValueChange={(nextMode) => {
             setScanMode(nextMode);
             setScanError(null);
-            if (nextMode === 'live') {
-              startLiveCamera();
-            }
           }}
           className="w-full"
           items={[
-            {
-              value: 'photo',
-              label: 'Foto aufnehmen',
-              icon: Camera,
-              activeIconClass: 'text-emerald-400',
-            },
             {
               value: 'live',
               label: 'Live-Scanner',
               icon: ScanLine,
               activeIconClass: 'text-emerald-400',
             },
+            {
+              value: 'photo',
+              label: 'Foto / Bild',
+              icon: Camera,
+              activeIconClass: 'text-emerald-400',
+            },
           ]}
         />
 
-        {/* MODUS 1: FOTO AUFNEHMEN / BILD AUSWÄHLEN */}
+        {/* MODUS 1: LIVE-KAMERA MIT AUTOMATISCHER ERKENNUNG */}
+        {scanMode === 'live' && (
+          <div className="relative rounded-2xl overflow-hidden bg-zinc-950 border border-zinc-800 aspect-[4/3] flex items-center justify-center">
+            <video
+              ref={videoRef}
+              playsInline
+              muted
+              autoPlay
+              className="absolute inset-0 w-full h-full object-cover"
+            />
+
+            {cameraState === 'active' && (
+              <>
+                <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-6">
+                  <div className="w-full max-w-[300px] h-32 rounded-xl border-2 border-emerald-400/80 shadow-[0_0_0_9999px_rgba(9,9,11,0.45)] relative overflow-hidden">
+                    <div className="absolute inset-x-2 top-1/2 h-0.5 bg-emerald-400/80 shadow-[0_0_10px_#34d399] animate-pulse" />
+                  </div>
+                </div>
+                <div className="pointer-events-none absolute bottom-2 inset-x-0 text-center text-[11px] font-medium text-zinc-200 drop-shadow">
+                  Suche Barcode…
+                </div>
+                {torchAvailable && (
+                  <button
+                    type="button"
+                    onClick={toggleTorch}
+                    aria-pressed={torchOn}
+                    className={`absolute top-2 right-2 h-9 px-3 rounded-xl border text-xs font-medium backdrop-blur transition ${
+                      torchOn
+                        ? 'bg-amber-400/90 border-amber-300 text-zinc-950'
+                        : 'bg-zinc-950/70 border-zinc-700 text-zinc-200'
+                    }`}
+                  >
+                    <Zap className="w-3.5 h-3.5 inline -mt-0.5 mr-1" />
+                    Licht
+                  </button>
+                )}
+              </>
+            )}
+
+            {cameraState === 'starting' && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-zinc-400">
+                <Loader2 className="w-6 h-6 animate-spin text-emerald-400" />
+                <span className="text-xs">Starte Kamera…</span>
+              </div>
+            )}
+
+            {cameraState === 'error' && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-4 text-center">
+                <Camera className="w-7 h-7 text-zinc-500" />
+                <Button variant="secondary" size="sm" onClick={startCamera}>
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Kamera erneut starten</span>
+                </Button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* MODUS 2: FOTO AUFNEHMEN / BILD AUSWÄHLEN (Ausweichweg) */}
         {scanMode === 'photo' && (
           <div className="space-y-3">
-            {/* Versteckte File-Inputs: einmal direkt Kamera (capture), einmal Galerie */}
             <input
               ref={cameraCaptureInputRef}
               type="file"
@@ -1185,8 +1354,7 @@ function BarcodeScannerModal({ open, onOpenChange, onBarcodeDetected }) {
               className="hidden"
             />
 
-            {/* Foto-Vorschau oder großer Kamera-Trigger */}
-            {previewUrl ? (
+            {previewUrl && (
               <div className="relative rounded-2xl overflow-hidden bg-zinc-950 border border-zinc-800 aspect-[16/10] flex items-center justify-center">
                 <img
                   src={previewUrl}
@@ -1194,35 +1362,14 @@ function BarcodeScannerModal({ open, onOpenChange, onBarcodeDetected }) {
                   className="max-h-full max-w-full object-contain"
                 />
                 {isDecoding && (
-                  <div className="absolute inset-0 bg-zinc-950/75 backdrop-blur-xs flex flex-col items-center justify-center gap-2 text-emerald-400">
+                  <div className="absolute inset-0 bg-zinc-950/75 flex flex-col items-center justify-center gap-2 text-emerald-400">
                     <Loader2 className="w-7 h-7 animate-spin" />
-                    <span className="text-xs font-semibold tracking-wide">
-                      Analysiere Barcode...
-                    </span>
+                    <span className="text-xs font-semibold tracking-wide">Analysiere Barcode...</span>
                   </div>
                 )}
               </div>
-            ) : (
-              <button
-                type="button"
-                onClick={() => cameraCaptureInputRef.current?.click()}
-                className="w-full py-8 px-4 rounded-2xl bg-zinc-950/90 hover:bg-zinc-950 border-2 border-dashed border-emerald-500/40 hover:border-emerald-400 transition flex flex-col items-center justify-center gap-2.5 text-center group active:scale-[0.99]"
-              >
-                <div className="w-12 h-12 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 group-hover:scale-105 transition">
-                  <Camera className="w-6 h-6" />
-                </div>
-                <div>
-                  <div className="text-sm font-bold text-zinc-100">
-                    Foto vom Barcode machen
-                  </div>
-                  <p className="text-xs text-zinc-400 mt-0.5 max-w-xs">
-                    Öffnet die Kamera für einen scharfen Schnappschuss des EAN-Strichcodes
-                  </p>
-                </div>
-              </button>
             )}
 
-            {/* Aktions-Buttons: Neues Foto & Galerie */}
             <div className="grid grid-cols-2 gap-2.5">
               <Button
                 variant="primary"
@@ -1231,9 +1378,8 @@ function BarcodeScannerModal({ open, onOpenChange, onBarcodeDetected }) {
                 disabled={isDecoding}
               >
                 <Camera className="w-4 h-4" />
-                <span>{previewUrl ? 'Neues Foto' : 'Kamera starten'}</span>
+                <span>{previewUrl ? 'Neues Foto' : 'Foto machen'}</span>
               </Button>
-
               <Button
                 variant="secondary"
                 size="md"
@@ -1247,50 +1393,6 @@ function BarcodeScannerModal({ open, onOpenChange, onBarcodeDetected }) {
           </div>
         )}
 
-        {/* MODUS 2: LIVE-KAMERA VIEWFINDER */}
-        {scanMode === 'live' && (
-          <div className="space-y-3">
-            <div className="relative rounded-2xl overflow-hidden bg-zinc-950 border border-zinc-800 aspect-[16/10] flex items-center justify-center">
-              <video
-                ref={videoRef}
-                playsInline
-                muted
-                className="w-full h-full object-cover"
-              />
-
-              {/* Zielrahmen Overlay */}
-              {isCameraActive && (
-                <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-6">
-                  <div className="w-full max-w-[260px] h-28 rounded-xl border-2 border-emerald-400/80 shadow-[0_0_0_9999px_rgba(9,9,11,0.48)] relative flex items-center justify-center">
-                    <div className="w-full h-0.5 bg-emerald-400/80 shadow-[0_0_10px_#34d399]" />
-                  </div>
-                </div>
-              )}
-
-              {!isCameraActive && !scanError && (
-                <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-zinc-400">
-                  <Loader2 className="w-6 h-6 animate-spin text-emerald-400" />
-                  <span className="text-xs">Starte Kamera...</span>
-                </div>
-              )}
-            </div>
-
-            {isCameraActive && (
-              <Button
-                variant="primary"
-                size="md"
-                onClick={handleCaptureLiveFrame}
-                disabled={isDecoding}
-                className="w-full"
-              >
-                <Camera className="w-4 h-4" />
-                <span>Jetzt Schnappschuss auswerten</span>
-              </Button>
-            )}
-          </div>
-        )}
-
-        {/* Fehler- oder Hinweis-Banner */}
         {scanError && (
           <div className="flex items-start gap-2 p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-200 leading-relaxed">
             <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
