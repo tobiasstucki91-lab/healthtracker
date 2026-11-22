@@ -2156,7 +2156,8 @@ export default function App() {
       setConfirmReset(false);
       setImportFeedback(null);
     }
-  }, [isSettingsOpen, appData.targets]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSettingsOpen]);
 
   // ==========================================================================
   // LIVE-SUCHE: OPEN FOOD FACTS (SEARCH-A-LICIOUS + EAN-BARCODE + FALLBACK)
@@ -3350,15 +3351,71 @@ export default function App() {
     showToast('Tagesziele gespeichert', null, 'emerald');
   };
 
-  const handleApplyEnergyPreview = () => {
-    if (!energyPreview) return;
-    setTargetForm((prev) => ({
+  // Speichert das Profil sofort; ist das automatische Ziel aktiv, wird das
+  // Tagesziel direkt neu berechnet und übernommen.
+  const persistEnergyProfile = (form, { force = false, weights = null } = {}) => {
+    const profile = normalizeProfile(form);
+    const stored = normalizeProfile(appData.targets.energy);
+    const unchanged =
+      JSON.stringify({ ...profile, lastReview: null }) === JSON.stringify({ ...stored, lastReview: null });
+    if (unchanged && !force) return;
+
+    const est = profile.enabled
+      ? estimateEnergy({
+          profile,
+          weightsByDate: weights || appData.weightsByDate || {},
+          intakeByDate,
+          today: getTodayKey(),
+          currentTarget: appData.targets.calories,
+        })
+      : null;
+    const macros = est
+      ? { calories: est.calories, protein: est.protein, carbs: est.carbs, fat: est.fat }
+      : {};
+
+    setAppData((prev) => ({
       ...prev,
-      calories: energyPreview.calories,
-      protein: energyPreview.protein,
-      carbs: energyPreview.carbs,
-      fat: energyPreview.fat,
+      ...(weights ? { weightsByDate: weights } : {}),
+      targets: {
+        ...prev.targets,
+        ...macros,
+        energy: { ...profile, lastReview: profile.enabled ? getTodayKey() : profile.lastReview },
+      },
     }));
+    if (est) {
+      setTargetForm((prev) => ({ ...prev, ...macros }));
+      showToast(`Tagesziel gesetzt: ${formatNumberDE(est.calories)} kcal`, null, 'emerald');
+    } else if (unchanged === false) {
+      showToast(profile.enabled ? 'Profil gespeichert' : 'Automatisches Kalorienziel aus', null, 'emerald');
+    }
+  };
+
+  // Auswahlfelder/Haken: sofort speichern; Zahlenfelder: beim Verlassen des Feldes
+  const updateEnergyForm = (patch, persist = false) => {
+    const next = { ...energyForm, ...patch };
+    setEnergyForm(next);
+    if (persist) persistEnergyProfile(next);
+  };
+
+  const handleApplyEnergyPreview = () => persistEnergyProfile(energyForm, { force: true });
+
+  // Noch kein Gewicht erfasst: direkt im Profil eintragen (zählt als heutiges Gewicht)
+  const [energyWeightInput, setEnergyWeightInput] = useState('');
+  const handleEnergyWeightSave = () => {
+    const kg = parseWeightNumber(energyWeightInput);
+    if (!kg || kg < 30 || kg > 300) {
+      showToast('Bitte ein gültiges Gewicht in kg eingeben', null, 'rose');
+      return;
+    }
+    const weights = { ...(appData.weightsByDate || {}), [getTodayKey()]: kg };
+    setEnergyWeightInput('');
+    persistEnergyProfile(energyForm, { force: true, weights });
+  };
+
+  // Dialog schließen speichert noch offene Profil-Eingaben
+  const handleSettingsOpenChange = (open) => {
+    if (!open && isSettingsOpen) persistEnergyProfile(energyForm);
+    setIsSettingsOpen(open);
   };
 
   const markEnergyReviewed = (extraTargets = {}) =>
@@ -6002,7 +6059,7 @@ export default function App() {
       {/* ==================================================================== */}
       <ModalDialog
         open={isSettingsOpen}
-        onOpenChange={setIsSettingsOpen}
+        onOpenChange={handleSettingsOpenChange}
         title="Ziele, Cloud-Sync &amp; Backup"
         description="Passe deine Tagesziele an, verbinde dein privates Google Drive zum Syncen oder erstelle ein lokales Backup."
       >
@@ -6025,7 +6082,7 @@ export default function App() {
                   <input
                     type="checkbox"
                     checked={energyForm.enabled}
-                    onChange={(e) => setEnergyForm({ ...energyForm, enabled: e.target.checked })}
+                    onChange={(e) => updateEnergyForm({ enabled: e.target.checked }, true)}
                     className="mt-0.5 w-4 h-4 accent-emerald-500"
                   />
                   <span>
@@ -6045,7 +6102,7 @@ export default function App() {
                         <select
                           id="en-sex"
                           value={energyForm.sex}
-                          onChange={(e) => setEnergyForm({ ...energyForm, sex: e.target.value })}
+                          onChange={(e) => updateEnergyForm({ sex: e.target.value }, true)}
                           className={ENERGY_FIELD_CLS}
                         >
                           <option value="m">Mann</option>
@@ -6059,7 +6116,8 @@ export default function App() {
                           type="number"
                           inputMode="numeric"
                           value={energyForm.heightCm}
-                          onChange={(e) => setEnergyForm({ ...energyForm, heightCm: e.target.value })}
+                          onChange={(e) => updateEnergyForm({ heightCm: e.target.value })}
+                          onBlur={() => persistEnergyProfile(energyForm)}
                           className={ENERGY_FIELD_CLS}
                         />
                       </div>
@@ -6070,7 +6128,8 @@ export default function App() {
                           type="number"
                           inputMode="numeric"
                           value={energyForm.birthYear}
-                          onChange={(e) => setEnergyForm({ ...energyForm, birthYear: e.target.value })}
+                          onChange={(e) => updateEnergyForm({ birthYear: e.target.value })}
+                          onBlur={() => persistEnergyProfile(energyForm)}
                           className={ENERGY_FIELD_CLS}
                         />
                       </div>
@@ -6082,7 +6141,8 @@ export default function App() {
                           step="0.1"
                           inputMode="decimal"
                           value={energyForm.proteinPerKg}
-                          onChange={(e) => setEnergyForm({ ...energyForm, proteinPerKg: e.target.value })}
+                          onChange={(e) => updateEnergyForm({ proteinPerKg: e.target.value })}
+                          onBlur={() => persistEnergyProfile(energyForm)}
                           className={ENERGY_FIELD_CLS}
                         />
                       </div>
@@ -6095,7 +6155,7 @@ export default function App() {
                       <select
                         id="en-activity"
                         value={energyForm.activity}
-                        onChange={(e) => setEnergyForm({ ...energyForm, activity: Number(e.target.value) })}
+                        onChange={(e) => updateEnergyForm({ activity: Number(e.target.value) }, true)}
                         className={ENERGY_FIELD_CLS}
                       >
                         {ACTIVITY_LEVELS.map((a) => (
@@ -6110,7 +6170,7 @@ export default function App() {
                         <select
                           id="en-goal"
                           value={energyForm.goal}
-                          onChange={(e) => setEnergyForm({ ...energyForm, goal: e.target.value })}
+                          onChange={(e) => updateEnergyForm({ goal: e.target.value }, true)}
                           className={ENERGY_FIELD_CLS}
                         >
                           <option value="lose">Abnehmen</option>
@@ -6124,7 +6184,7 @@ export default function App() {
                           <select
                             id="en-rate"
                             value={energyForm.ratePct}
-                            onChange={(e) => setEnergyForm({ ...energyForm, ratePct: Number(e.target.value) })}
+                            onChange={(e) => updateEnergyForm({ ratePct: Number(e.target.value) }, true)}
                             className={ENERGY_FIELD_CLS}
                           >
                             {RATE_OPTIONS.map((r) => (
@@ -6149,15 +6209,38 @@ export default function App() {
                           · {energyPreview.protein} g P · {energyPreview.carbs} g KH · {energyPreview.fat} g F
                         </div>
                         <Button variant="secondary" size="sm" onClick={handleApplyEnergyPreview} className="shrink-0">
-                          Werte übernehmen
+                          Neu berechnen
                         </Button>
                       </div>
                     ) : (
-                      <p className="text-[11px] text-amber-300">
-                        Trage zuerst dein aktuelles Gewicht ein (Tagesansicht), dann kann die App rechnen.
-                      </p>
+                      <div className="space-y-1.5">
+                        <label htmlFor="en-weight" className="block text-xs font-medium text-amber-300">
+                          Aktuelles Gewicht (kg) – wird zum Berechnen gebraucht
+                        </label>
+                        <div className="flex gap-2">
+                          <input
+                            id="en-weight"
+                            type="text"
+                            inputMode="decimal"
+                            value={energyWeightInput}
+                            onChange={(e) => setEnergyWeightInput(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                handleEnergyWeightSave();
+                              }
+                            }}
+                            placeholder="z. B. 82,5"
+                            className={ENERGY_FIELD_CLS}
+                          />
+                          <Button variant="primary" size="sm" onClick={handleEnergyWeightSave} className="shrink-0 h-[34px]">
+                            Berechnen
+                          </Button>
+                        </div>
+                      </div>
                     )}
                     <p className="text-[11px] text-zinc-500 leading-relaxed">
+                      Änderungen werden sofort gespeichert und das Tagesziel automatisch angepasst.
                       Schätzung für den Alltag, keine ärztliche Beratung. Das Ziel sinkt nie unter deinen Grundumsatz,
                       das Defizit ist auf 25 % begrenzt.
                     </p>
