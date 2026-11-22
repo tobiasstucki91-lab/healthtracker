@@ -3,6 +3,8 @@ import {
   ArrowDown,
   ArrowUp,
   Check,
+  CheckCircle2,
+  ChevronDown,
   Dumbbell,
   Pencil,
   Play,
@@ -111,6 +113,10 @@ export function TrainingView({ appData, setAppData, selectedDate, dateLabel, onS
   );
 
   const [editing, setEditing] = useState<WorkoutTemplate | null>(null);
+  // Aufgeklappte Einheiten; ohne Eintrag ist nur die neueste des Tages offen
+  const [openSessions, setOpenSessions] = useState<Record<string, boolean>>({});
+  const newestId = sessions.length > 0 ? sessions[sessions.length - 1].id : null;
+  const isOpen = (id: string) => openSessions[id] ?? id === newestId;
   const [newExerciseName, setNewExerciseName] = useState('');
   const [showLibrary, setShowLibrary] = useState(false);
 
@@ -148,6 +154,8 @@ export function TrainingView({ appData, setAppData, selectedDate, dateLabel, onS
   const startSession = (template: WorkoutTemplate | null) => {
     const session = createSession({ template, exercises, workoutsByDate, date: selectedDate, newId });
     updateSessions((list) => [...list, session]);
+    // neue Einheit aufklappen, die übrigen zuklappen
+    setOpenSessions(Object.fromEntries([...sessions.map((x) => [x.id, false]), [session.id, true]]));
     notify(template ? `Workout „${template.name}“ gestartet` : 'Freies Training gestartet');
   };
 
@@ -205,6 +213,8 @@ export function TrainingView({ appData, setAppData, selectedDate, dateLabel, onS
           <SessionCard
             key={session.id}
             session={session}
+            open={isOpen(session.id)}
+            onToggle={() => setOpenSessions((m) => ({ ...m, [session.id]: !isOpen(session.id) }))}
             selectedDate={selectedDate}
             workoutsByDate={workoutsByDate}
             exercises={sortedExercises}
@@ -440,6 +450,8 @@ export function TrainingView({ appData, setAppData, selectedDate, dateLabel, onS
 
 function SessionCard({
   session,
+  open,
+  onToggle,
   selectedDate,
   workoutsByDate,
   exercises,
@@ -452,6 +464,8 @@ function SessionCard({
   onCreateExercise,
 }: {
   session: Session;
+  open: boolean;
+  onToggle: () => void;
   selectedDate: string;
   workoutsByDate: WorkoutsByDate;
   exercises: Exercise[];
@@ -468,18 +482,37 @@ function SessionCard({
   const [savingName, setSavingName] = useState<string | null>(null);
   const done = doneSetCount(session);
   const volume = sessionVolume(session);
+  const totalSets = session.exercises.reduce((n, e) => n + e.sets.length, 0);
+  // Übungen als Akkordeon: offen ist die gewählte, sonst die erste unfertige
+  const [openUid, setOpenUid] = useState<string | null | undefined>(undefined);
+  const autoUid = session.exercises.find((e) => e.sets.length === 0 || e.sets.some((x) => !x.done))?.uid ?? null;
+  const activeUid = openUid === undefined ? autoUid : openUid;
 
 
   return (
     <article className="rounded-2xl border border-zinc-700/80 bg-zinc-900 shadow-[0_8px_24px_rgba(0,0,0,0.35)] overflow-hidden">
-      <header className="flex items-center gap-3 px-4 py-3 bg-zinc-900 border-b border-zinc-800">
-        <Dumbbell className="w-4 h-4 text-emerald-400 shrink-0" />
-        <div className="flex-1 min-w-0">
-          <div className="text-sm font-bold text-zinc-100 truncate">{session.name}</div>
-          <div className="text-[11px] text-zinc-500 tabular-nums">
-            {done} {done === 1 ? 'Satz' : 'Sätze'} erledigt · {volume.toLocaleString('de-DE')} kg bewegt
-          </div>
-        </div>
+      <header className={`flex items-center gap-2 pl-2 pr-4 py-2 bg-zinc-900 ${open ? 'border-b border-zinc-800' : ''}`}>
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={open}
+          className="flex-1 min-w-0 flex items-center gap-3 px-2 py-1.5 rounded-xl text-left hover:bg-zinc-800/60 transition"
+        >
+          <Dumbbell className="w-4 h-4 text-emerald-400 shrink-0" />
+          <span className="flex-1 min-w-0">
+            <span className="block text-sm font-bold text-zinc-100 truncate">{session.name}</span>
+            <span className="block text-[11px] text-zinc-500 tabular-nums truncate">
+              {session.exercises.length} {session.exercises.length === 1 ? 'Übung' : 'Übungen'} · {done}/{totalSets} Sätze
+              {volume > 0 ? ` · ${volume.toLocaleString('de-DE')} kg` : ''}
+            </span>
+            {!open && session.exercises.length > 0 && (
+              <span className="block text-[11px] text-zinc-400 truncate">
+                {session.exercises.map((e) => e.name).join(' · ')}
+              </span>
+            )}
+          </span>
+          <ChevronDown className={`w-4 h-4 text-zinc-400 shrink-0 transition-transform ${open ? '' : '-rotate-90'}`} />
+        </button>
         <button
           type="button"
           onClick={() => {
@@ -492,21 +525,60 @@ function SessionCard({
         </button>
       </header>
 
+      {open && (<>
       <div className="divide-y divide-zinc-800">
         {session.exercises.map((ex) => {
             const last = lastPerformance(workoutsByDate, ex.exerciseId, selectedDate, session.id);
             const lastText = last ? formatSets(last.sets) : '';
+            const exDone = ex.sets.filter((x) => x.done).length;
+            const allDone = ex.sets.length > 0 && exDone === ex.sets.length;
+            const expanded = activeUid === ex.uid;
+            if (!expanded) {
+              const doneText = formatSets(ex.sets.filter((x) => x.done));
+              return (
+                <button
+                  key={ex.uid}
+                  type="button"
+                  onClick={() => setOpenUid(ex.uid)}
+                  aria-expanded={false}
+                  className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-zinc-800/50 transition"
+                >
+                  {allDone ? (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  ) : (
+                    <span className="w-4 h-4 rounded-full border border-zinc-600 shrink-0" aria-hidden="true" />
+                  )}
+                  <span className="flex-1 min-w-0">
+                    <span className={`block text-sm font-semibold truncate ${allDone ? 'text-zinc-300' : 'text-zinc-100'}`}>
+                      {ex.name}
+                    </span>
+                    <span className="block text-[11px] text-zinc-500 tabular-nums truncate">
+                      {exDone}/{ex.sets.length} Sätze{doneText ? ` · ${doneText}` : lastText ? ` · Letztes Mal: ${lastText}` : ''}
+                    </span>
+                  </span>
+                  <ChevronDown className="w-4 h-4 text-zinc-500 shrink-0 -rotate-90" />
+                </button>
+              );
+            }
             return (
-              <div key={ex.uid} className="px-4 py-3.5 space-y-2.5">
+              <div key={ex.uid} className="px-4 py-3.5 space-y-2.5 bg-zinc-900">
                 <div className="flex items-start gap-2">
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-semibold text-zinc-100">{ex.name}</div>
+                  <button
+                    type="button"
+                    onClick={() => setOpenUid(null)}
+                    aria-expanded={true}
+                    className="flex-1 min-w-0 text-left"
+                  >
+                    <span className="flex items-center gap-1.5 text-sm font-semibold text-zinc-100">
+                      {ex.name}
+                      <ChevronDown className="w-4 h-4 text-zinc-500" />
+                    </span>
                     {lastText && (
-                      <div className="text-[11px] text-zinc-500 tabular-nums">
+                      <span className="block text-[11px] text-zinc-500 tabular-nums">
                         Letztes Mal: {lastText}
-                      </div>
+                      </span>
                     )}
-                  </div>
+                  </button>
                   <button
                     type="button"
                     onClick={() => onRemoveExercise(session.id, ex.uid)}
@@ -564,6 +636,7 @@ function SessionCard({
               onChange={(e) => {
                 if (e.target.value) {
                   onAddExercise(session.id, e.target.value);
+                  setOpenUid(undefined);
                   setAdding(false);
                 }
               }}
@@ -646,6 +719,7 @@ function SessionCard({
           </>
         )}
       </footer>
+      </>)}
     </article>
   );
 }
