@@ -63,6 +63,14 @@ import { SyncBanner, SyncHeaderButton, SyncSettingsPanel } from './components/Sy
 import { ZoneHeader } from './components/ZoneHeader';
 import { TrainingView } from './components/TrainingView';
 import { DEFAULT_EXERCISES } from './training/model';
+import {
+  isSatisfied as isHabitSatisfied,
+  streak as habitStreak,
+  weeklyTarget,
+  weekCount,
+  weekDays,
+  FREQUENCY_OPTIONS,
+} from './habits/frequency';
 
 // ============================================================================
 // KONSTANTEN & STANDARDWERTE
@@ -2008,6 +2016,7 @@ export default function App() {
   // Habit-Tracker Bearbeitungsmodus
   const [editingHabits, setEditingHabits] = useState(false);
   const [newHabitTitle, setNewHabitTitle] = useState('');
+  const [newHabitPerWeek, setNewHabitPerWeek] = useState(0);
 
   // Einstellungs-Modal & Backup
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -2457,8 +2466,8 @@ export default function App() {
   );
 
   const completedHabitsCount = useMemo(() => {
-    return appData.habits.filter((h) => Boolean(dayHabitChecks[h.id])).length;
-  }, [appData.habits, dayHabitChecks]);
+    return appData.habits.filter((h) => isHabitSatisfied(h, appData.habitChecksByDate, selectedDate)).length;
+  }, [appData.habits, appData.habitChecksByDate, selectedDate]);
 
   // Auto-berechnete Kalorien für die manuelle Schnelleingabe
   const autoCalculatedCalories = useMemo(() => {
@@ -2483,7 +2492,7 @@ export default function App() {
         }),
         { calories: 0, protein: 0 }
       );
-      const doneHabits = appData.habits.filter((h) => Boolean(checks[h.id])).length;
+      const doneHabits = appData.habits.filter((h) => isHabitSatisfied(h, appData.habitChecksByDate, key)).length;
       const totalHabits = appData.habits.length;
       days.push({
         key,
@@ -3294,13 +3303,26 @@ export default function App() {
     const newHabit = {
       id: generateId('hab'),
       title: newHabitTitle.trim(),
+      ...(newHabitPerWeek > 0 ? { perWeek: newHabitPerWeek } : {}),
     };
     setAppData((prev) => ({
       ...prev,
       habits: [...prev.habits, newHabit],
     }));
     setNewHabitTitle('');
+    setNewHabitPerWeek(0);
     showToast(`Habit hinzugefügt: ${newHabit.title}`, null, 'emerald');
+  };
+
+  const handleSetHabitFrequency = (habitId, perWeek) => {
+    setAppData((prev) => ({
+      ...prev,
+      habits: prev.habits.map((h) => {
+        if (h.id !== habitId) return h;
+        const { perWeek: _old, ...rest } = h;
+        return perWeek > 0 ? { ...rest, perWeek } : rest;
+      }),
+    }));
   };
 
   const handleDeleteHabit = (habitId) => {
@@ -5219,7 +5241,7 @@ export default function App() {
                 <section aria-labelledby="zone-habits" className="space-y-3">
                 <ZoneHeader
                   id="zone-habits"
-                  title="Tägliche Habits"
+                  title="Habits"
                   right={
                     <>
                       <Badge
@@ -5258,7 +5280,15 @@ export default function App() {
                   <div className="space-y-2">
                     {appData.habits.map((habit) => {
                       const isDone = Boolean(dayHabitChecks[habit.id]);
-                      const streak = getHabitStreak(habit.id);
+                      const st = habitStreak(habit, appData.habitChecksByDate, selectedDate);
+                      const perWeek = weeklyTarget(habit);
+                      const weekDone = perWeek ? weekCount(appData.habitChecksByDate, habit.id, selectedDate) : 0;
+                      const heatDays = perWeek
+                        ? weekDays(selectedDate).map((key) => {
+                            const d = parseDateKey(key);
+                            return { key, weekday: WEEKDAYS_SHORT[d.getDay()], dayNum: d.getDate() };
+                          })
+                        : last7Days;
 
                       return (
                         <div
@@ -5284,21 +5314,52 @@ export default function App() {
                               >
                                 <Check className="w-3.5 h-3.5 stroke-[2.75]" />
                               </span>
-                              <span
-                                className={`text-xs sm:text-sm font-medium truncate transition ${
-                                  isDone ? 'text-zinc-100' : 'text-zinc-300'
-                                }`}
-                              >
-                                {habit.title}
+                              <span className="min-w-0">
+                                <span
+                                  className={`block text-xs sm:text-sm font-medium truncate transition ${
+                                    isDone ? 'text-zinc-100' : 'text-zinc-300'
+                                  }`}
+                                >
+                                  {habit.title}
+                                </span>
+                                {perWeek && (
+                                  <span
+                                    className={`block text-[11px] tabular-nums ${
+                                      weekDone >= perWeek ? 'text-emerald-400' : 'text-zinc-500'
+                                    }`}
+                                  >
+                                    {Math.min(weekDone, perWeek)}/{perWeek} diese Woche
+                                    {weekDone >= perWeek ? ' · Ziel erreicht' : ''}
+                                  </span>
+                                )}
                               </span>
                             </button>
 
                             <div className="flex items-center gap-1.5 shrink-0">
-                              {streak > 0 && (
-                                <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md bg-amber-500/15 border border-amber-500/30 text-[11px] font-bold text-amber-300 tabular-nums">
+                              {st.count > 0 && (
+                                <span
+                                  title={st.unit === 'week' ? `${st.count} Wochen in Folge` : `${st.count} Tage in Folge`}
+                                  className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md bg-amber-500/15 border border-amber-500/30 text-[11px] font-bold text-amber-300 tabular-nums"
+                                >
                                   <Flame className="w-3 h-3 text-amber-400" />
-                                  {streak}
+                                  {st.count}
+                                  {st.unit === 'week' ? ' Wo.' : ''}
                                 </span>
+                              )}
+
+                              {editingHabits && (
+                                <select
+                                  value={perWeek ?? 0}
+                                  onChange={(e) => handleSetHabitFrequency(habit.id, Number(e.target.value))}
+                                  aria-label={`Häufigkeit für ${habit.title}`}
+                                  className="h-8 px-2 text-[11px] bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-200 focus:outline-none focus:border-emerald-500"
+                                >
+                                  {FREQUENCY_OPTIONS.map((o) => (
+                                    <option key={o.value} value={o.value}>
+                                      {o.label}
+                                    </option>
+                                  ))}
+                                </select>
                               )}
 
                               {editingHabits && (
@@ -5315,7 +5376,7 @@ export default function App() {
 
                           {/* 7-Tage Mini-Heatmap pro Habit */}
                           <div className="mt-2.5 pt-2 border-t border-zinc-800/60 flex items-center justify-between gap-1">
-                            {last7Days.map((day) => {
+                            {heatDays.map((day) => {
                               const checkedOnDay = Boolean(
                                 (appData.habitChecksByDate[day.key] || {})[habit.id]
                               );
@@ -5347,14 +5408,27 @@ export default function App() {
                   </div>
 
                   {editingHabits && (
-                    <form onSubmit={handleAddHabit} className="flex items-center gap-2 pt-1">
+                    <form onSubmit={handleAddHabit} className="flex flex-wrap items-center gap-2 pt-1">
                       <input
                         type="text"
                         value={newHabitTitle}
                         onChange={(e) => setNewHabitTitle(e.target.value)}
                         placeholder="Neues Habit (z. B. 20 Min. Lesen)"
-                        className="flex-1 px-3 py-2 text-xs bg-zinc-950 border border-zinc-800 rounded-xl text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-emerald-500"
+                        aria-label="Neues Habit"
+                        className="flex-1 min-w-[180px] px-3 py-2 text-xs bg-zinc-950 border border-zinc-800 rounded-xl text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-emerald-500"
                       />
+                      <select
+                        value={newHabitPerWeek}
+                        onChange={(e) => setNewHabitPerWeek(Number(e.target.value))}
+                        aria-label="Häufigkeit des neuen Habits"
+                        className="px-2 py-2 text-xs bg-zinc-950 border border-zinc-800 rounded-xl text-zinc-200 focus:outline-none focus:border-emerald-500"
+                      >
+                        {FREQUENCY_OPTIONS.map((o) => (
+                          <option key={o.value} value={o.value}>
+                            {o.label}
+                          </option>
+                        ))}
+                      </select>
                       <Button type="submit" variant="primary" size="sm">
                         <Plus className="w-3.5 h-3.5" />
                         <span>Hinzufügen</span>

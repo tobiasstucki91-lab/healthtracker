@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test": "node --test src/sync/model.test.ts src/foods/bls.test.ts src/energy/adaptive.test.ts src/training/model.test.ts"
+    "test": "node --test src/sync/model.test.ts src/foods/bls.test.ts src/energy/adaptive.test.ts src/training/model.test.ts src/habits/frequency.test.ts"
   },
   "dependencies": {
     "@zxing/browser": "^0.2.1",
