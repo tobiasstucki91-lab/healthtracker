@@ -3598,7 +3598,7 @@ export default function App() {
       {/* ==================================================================== */}
       <aside className="hidden lg:flex fixed inset-y-0 left-0 z-40 w-60 flex-col gap-8 px-5 py-8 border-r border-zinc-800/70 bg-zinc-950">
         <div className="flex items-center gap-2.5 px-2">
-          <img src={`${import.meta.env.BASE_URL}icon.svg`} alt="" className="w-7 h-7 rounded-[9px]" />
+          <img src={`${import.meta.env.BASE_URL}icon.svg?v=2`} alt="" className="w-7 h-7 rounded-[9px]" />
           <span className="text-[15px] font-semibold tracking-tight">Health Tracker</span>
         </div>
 
@@ -3675,7 +3675,7 @@ export default function App() {
         <div className="max-w-6xl mx-auto px-3 sm:px-6 h-16 flex items-center justify-between gap-2">
           {/* App-Branding (Handy: ausgeblendet, PC: steht in der Seitenleiste) */}
           <div className="hidden sm:flex lg:hidden items-center gap-2.5 shrink-0">
-            <img src={`${import.meta.env.BASE_URL}icon.svg`} alt="" className="w-8 h-8 rounded-[10px]" />
+            <img src={`${import.meta.env.BASE_URL}icon.svg?v=2`} alt="" className="w-8 h-8 rounded-[10px]" />
             <div className="hidden sm:block">
               <div className="flex items-center gap-1.5">
                 <span className="text-sm font-bold tracking-tight text-zinc-100 leading-none">
