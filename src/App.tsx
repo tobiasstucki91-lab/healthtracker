@@ -507,6 +507,29 @@ function SpotlightCard({
 }
 
 /**
+ * Überschrift eines Bereichs (Tagesbilanz, Essen hinzufügen …): steht über der
+ * Karte, mit Trennlinie und optionalen Infos/Aktionen rechts.
+ */
+function ZoneHeader({ id, title, right = null }) {
+  return (
+    <div className="flex items-center gap-3 min-h-[32px]">
+      <h2
+        id={id}
+        className="text-xs font-bold uppercase tracking-[0.12em] text-zinc-200 whitespace-nowrap"
+      >
+        {title}
+      </h2>
+      <div className="flex-1 h-px bg-zinc-800" aria-hidden="true" />
+      {right && (
+        <div className="flex items-center gap-2 shrink-0 text-xs text-zinc-400 tabular-nums">
+          {right}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
  * shadcn/ui Button Primitive
  */
 function Button({
@@ -580,11 +603,17 @@ function Badge({ children, variant = 'secondary', className = '' }) {
 /**
  * Radix-style SegmentedTabs with data-state="active" & smooth pill highlight
  */
-function SegmentedTabs({ items, value, onValueChange, className = '' }) {
+function SegmentedTabs({ items, value, onValueChange, className = '', variant = 'default' }) {
+  // variant "band": Reiter in einer Kopfleiste (Handy: 4 gleich breite Spalten, Symbol über Text)
+  const band = variant === 'band';
   return (
     <div
       role="tablist"
-      className={`inline-flex flex-wrap sm:flex-nowrap items-center gap-1 rounded-xl bg-zinc-950/90 p-1 border border-zinc-800/90 ${className}`}
+      className={
+        band
+          ? `grid grid-cols-4 sm:flex items-stretch gap-1 ${className}`
+          : `inline-flex flex-wrap sm:flex-nowrap items-center gap-1 rounded-xl bg-zinc-950/90 p-1 border border-zinc-800/90 ${className}`
+      }
     >
       {items.map((item) => {
         const isActive = item.value === value;
@@ -597,7 +626,11 @@ function SegmentedTabs({ items, value, onValueChange, className = '' }) {
             aria-selected={isActive}
             data-state={isActive ? 'active' : 'inactive'}
             onClick={() => onValueChange(item.value)}
-            className={`relative flex-1 sm:flex-initial inline-flex items-center justify-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50 ${
+            className={`relative flex-1 sm:flex-initial inline-flex items-center justify-center rounded-lg font-semibold whitespace-nowrap ${
+              band
+                ? 'flex-col sm:flex-row gap-1 sm:gap-1.5 min-h-[48px] sm:min-h-[40px] px-1 sm:px-3 py-1.5 text-[11px] sm:text-xs'
+                : 'gap-1.5 px-2.5 sm:px-3 py-1.5 text-xs'
+            } transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50 ${
               isActive
                 ? 'bg-zinc-800 text-zinc-50 border border-zinc-700/80 shadow-sm'
                 : 'text-zinc-400 hover:text-zinc-200 border border-transparent'
@@ -613,7 +646,7 @@ function SegmentedTabs({ items, value, onValueChange, className = '' }) {
             <span>{item.label}</span>
             {item.badge !== undefined && item.badge !== null && (
               <span
-                className={`ml-0.5 px-1.5 py-0.2 rounded-full text-[10px] font-bold tabular-nums ${
+                className={`${band ? 'hidden sm:inline ' : ''}ml-0.5 px-1.5 py-0.2 rounded-full text-[10px] font-bold tabular-nums ${
                   isActive
                     ? 'bg-emerald-500 text-zinc-950'
                     : 'bg-zinc-800 text-zinc-400'
@@ -2259,12 +2292,11 @@ export default function App() {
   };
 
   // Gefilterte Suchergebnisse gemäß Filter-Pill ('all' | 'basis' | 'bls' | 'off')
-  const filteredSearchResults = useMemo(() => {
-    if (sourceFilter === 'basis') return localBasisResults;
-    if (sourceFilter === 'bls') return blsResults;
-    if (sourceFilter === 'off') return offResults;
-    return [...localBasisResults, ...blsResults.slice(0, 12), ...offResults];
-  }, [sourceFilter, localBasisResults, blsResults, offResults]);
+  // Suche immer in allen Quellen: Basis-DB, BLS, Open Food Facts
+  const filteredSearchResults = useMemo(
+    () => [...localBasisResults, ...blsResults.slice(0, 12), ...offResults],
+    [localBasisResults, blsResults, offResults]
+  );
 
   const quickPickFoods = useMemo(() => {
     return QUICK_PICK_IDS.map((id) => GERMAN_BASIS_FOODS.find((f) => f.id === id)).filter(Boolean);
@@ -3588,9 +3620,9 @@ export default function App() {
       {/* ==================================================================== */}
       {/* HAUPTBEREICH (BENTO-DASHBOARD, LOGGING & HABIT TRACKER)              */}
       {/* ==================================================================== */}
-      <main className="relative z-10 max-w-6xl mx-auto px-3 sm:px-6 pt-4 sm:pt-6 space-y-5">
+      <main className="relative z-10 max-w-6xl mx-auto px-3 sm:px-6 pt-1 sm:pt-6 space-y-5">
         {/* Obere Navigationsleiste: Hauptansicht & 1-Klick Schnell-Waage */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between lg:justify-end gap-2.5">
+        <div className="hidden sm:flex lg:hidden items-center gap-2.5">
           <SegmentedTabs
             value={activeView}
             onValueChange={setActiveView}
@@ -3611,104 +3643,25 @@ export default function App() {
             ]}
           />
 
-          {/* Kompakte 1-Klick Schnell-Waage für den ausgewählten Tag */}
-          <form
-            onSubmit={handleSaveWeight}
-            className="flex items-center justify-between sm:justify-end gap-1.5 bg-zinc-900/80 border border-zinc-800/90 rounded-xl px-2.5 py-1.5"
-          >
-            <div className="flex items-center gap-1.5 text-xs text-zinc-400">
-              <Scale className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-              <span className="font-medium text-zinc-300">Gewicht ({dateHeader.badge}):</span>
-            </div>
-
-            <div className="flex items-center gap-1">
-              <button
-                type="button"
-                onClick={() => handleStepWeight(-0.1)}
-                aria-label="Gewicht um 0,1 kg verringern"
-                className="w-6 h-6 rounded-lg bg-zinc-950 border border-zinc-800 text-zinc-400 hover:text-zinc-100 hover:border-zinc-700 flex items-center justify-center text-xs font-bold transition"
-              >
-                -
-              </button>
-              <div className="relative w-20">
-                <input
-                  type="text"
-                  inputMode="decimal"
-                  value={weightInput}
-                  onChange={(e) => setWeightInput(e.target.value)}
-                  placeholder={
-                    latestWeightEntry ? formatWeightDE(latestWeightEntry.weight) : '80,0'
-                  }
-                  className="w-full pl-2 pr-6 py-1 text-xs font-bold tabular-nums text-right bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-sky-500"
-                />
-                <span className="text-[10px] text-zinc-500 absolute right-1.5 top-1/2 -translate-y-1/2 pointer-events-none">
-                  kg
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => handleStepWeight(0.1)}
-                aria-label="Gewicht um 0,1 kg erhöhen"
-                className="w-6 h-6 rounded-lg bg-zinc-950 border border-zinc-800 text-zinc-400 hover:text-zinc-100 hover:border-zinc-700 flex items-center justify-center text-xs font-bold transition"
-              >
-                +
-              </button>
-              <Button type="submit" variant="secondary" size="xs" className="ml-0.5">
-                <Check className="w-3 h-3 text-sky-400" />
-                <span className="hidden sm:inline">OK</span>
-              </Button>
-            </div>
-          </form>
         </div>
 
         {/* ================================================================== */}
         {/* ANSICHT A: KALORIEN, MAKROS & HABITS                               */}
         {/* ================================================================== */}
         {activeView === 'daily' && (
-          <>
-            {/* Mobile Schnellaktionen & Sektionsfilter */}
-            <div className="flex md:hidden items-center justify-between gap-2">
-              <SegmentedTabs
-                value={mobileSection}
-                onValueChange={setMobileSection}
-                className="flex-1"
-                items={[
-                  { value: 'all', label: 'Alles' },
-                  { value: 'food', label: 'Mahlzeiten', badge: dayLogs.length },
-                  {
-                    value: 'habits',
-                    label: 'Habits',
-                    badge: `${completedHabitsCount}/${appData.habits.length}`,
-                  },
-                ]}
-              />
-
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleCopyYesterday}
-                disabled={yesterdayLogs.length === 0}
-                title="Gestern übernehmen"
-              >
-                <Copy className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Gestern</span>
-              </Button>
-            </div>
-
+          <div className="space-y-8 sm:space-y-10">
             {/* ============================================================== */}
             {/* BENTO-DASHBOARD: KALORIEN-GAUGE & MAKRO-BALKEN                 */}
             {/* ============================================================== */}
-            <section
-              aria-label="Tagesübersicht Kalorien und Makros"
-              className="grid grid-cols-1 lg:grid-cols-12 gap-4"
-            >
+            <section aria-labelledby="zone-bilanz" className="space-y-3">
+              <ZoneHeader
+                id="zone-bilanz"
+                title="Tagesbilanz"
+                right={<span>Ziel {formatNumberDE(appData.targets.calories)} kcal</span>}
+              />
+              <div className="rounded-2xl bg-zinc-900 border border-zinc-700/80 shadow-[0_8px_24px_rgba(0,0,0,0.35)] p-4 sm:p-6 grid grid-cols-1 lg:grid-cols-12 gap-5 lg:gap-8 items-center">
               {/* Links: Kalorien Radial-Gauge (5 Spalten) */}
-              <SpotlightCard
-                spotlightColor={
-                  calOver ? 'rgba(244, 63, 94, 0.12)' : 'rgba(16, 185, 129, 0.1)'
-                }
-                className="lg:col-span-5 p-4 sm:p-5 flex items-center justify-between gap-4"
-              >
+              <div className="lg:col-span-5 flex items-center justify-between gap-4">
                 <div className="space-y-2.5 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400">
@@ -3781,12 +3734,12 @@ export default function App() {
                     <span className="text-[10px] text-zinc-500 mt-1">erreicht</span>
                   </div>
                 </div>
-              </SpotlightCard>
+              </div>
 
               {/* Rechts: Makro-Fortschritt (7 Spalten) */}
-              <SpotlightCard className="lg:col-span-7 p-4 sm:p-5 flex flex-col justify-between gap-4">
+              <div className="lg:col-span-7 flex flex-col justify-between gap-4 pt-5 border-t border-zinc-800 lg:pt-0 lg:border-t-0 lg:pl-8 lg:border-l">
                 {/* Hervorgehobener Protein-Balken */}
-                <div className="p-3 rounded-xl bg-zinc-950/75 border border-emerald-500/20 space-y-2">
+                <div className="space-y-2">
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
                       <span className="text-xs font-bold uppercase tracking-wider text-emerald-400">
@@ -3816,7 +3769,7 @@ export default function App() {
                 {/* Kohlenhydrate & Fette nebeneinander */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   {/* Kohlenhydrate */}
-                  <div className="p-3 rounded-xl bg-zinc-950/60 border border-zinc-800/80 space-y-2">
+                  <div className="space-y-2">
                     <div className="flex items-center justify-between gap-1 text-xs">
                       <span className="font-semibold text-zinc-200">Kohlenhydrate</span>
                       <span className="tabular-nums text-zinc-300">
@@ -3836,7 +3789,7 @@ export default function App() {
                   </div>
 
                   {/* Fette */}
-                  <div className="p-3 rounded-xl bg-zinc-950/60 border border-zinc-800/80 space-y-2">
+                  <div className="space-y-2">
                     <div className="flex items-center justify-between gap-1 text-xs">
                       <span className="font-semibold text-sky-400">Fette</span>
                       <span className="tabular-nums text-zinc-300">
@@ -3855,30 +3808,83 @@ export default function App() {
                     </div>
                   </div>
                 </div>
-              </SpotlightCard>
+              </div>
+              </div>
+
+              {/* Kompakte 1-Klick Schnell-Waage für den ausgewählten Tag */}
+              <form
+                onSubmit={handleSaveWeight}
+                className="flex items-center justify-between gap-2 bg-zinc-900 border border-zinc-800 rounded-2xl px-3 py-2"
+              >
+                <div className="flex items-center gap-1.5 text-xs text-zinc-400">
+                  <Scale className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                  <span className="font-medium text-zinc-300">Gewicht ({dateHeader.badge})</span>
+                </div>
+
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => handleStepWeight(-0.1)}
+                    aria-label="Gewicht um 0,1 kg verringern"
+                    className="w-9 h-9 rounded-xl bg-zinc-950 border border-zinc-800 text-zinc-400 hover:text-zinc-100 hover:border-zinc-700 flex items-center justify-center text-xs font-bold transition"
+                  >
+                    -
+                  </button>
+                  <div className="relative w-24">
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={weightInput}
+                      onChange={(e) => setWeightInput(e.target.value)}
+                      placeholder={
+                        latestWeightEntry ? formatWeightDE(latestWeightEntry.weight) : '80,0'
+                      }
+                      className="w-full pl-2 pr-6 py-2 text-sm font-bold tabular-nums text-right bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-sky-500"
+                    />
+                    <span className="text-[10px] text-zinc-500 absolute right-1.5 top-1/2 -translate-y-1/2 pointer-events-none">
+                      kg
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleStepWeight(0.1)}
+                    aria-label="Gewicht um 0,1 kg erhöhen"
+                    className="w-9 h-9 rounded-xl bg-zinc-950 border border-zinc-800 text-zinc-400 hover:text-zinc-100 hover:border-zinc-700 flex items-center justify-center text-xs font-bold transition"
+                  >
+                    +
+                  </button>
+                  <Button type="submit" variant="secondary" size="sm" className="ml-0.5 h-9">
+                    <Check className="w-3 h-3 text-sky-400" />
+                    <span className="hidden sm:inline">OK</span>
+                  </Button>
+                </div>
+              </form>
             </section>
 
             {/* ============================================================== */}
             {/* HAUPT-ARBEITSBEREICH: ERFASSUNG & PROTOKOLL (7) | HABITS (5)   */}
             {/* ============================================================== */}
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 sm:gap-10 lg:gap-8 items-start">
               {/* LINKE SPALTE: MAHLZEITENERFASSUNG & TAGESPROTOKOLL (7 Spalten) */}
               <div
-                className={`lg:col-span-7 space-y-5 ${
+                className={`lg:col-span-7 space-y-8 sm:space-y-10 ${
                   mobileSection === 'habits' ? 'hidden md:block' : 'block'
                 }`}
               >
                 {/* Erfassungs-Karte */}
-                <SpotlightCard className="p-4 sm:p-5 space-y-4">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                <section aria-labelledby="zone-essen" className="space-y-3">
+                <ZoneHeader id="zone-essen" title="Essen hinzufügen" />
+                <div className="rounded-2xl border border-zinc-800 bg-[#101114] overflow-hidden">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-2 sm:p-2.5 bg-zinc-900 border-b border-zinc-800">
                     <SegmentedTabs
                       value={entryTab}
                       onValueChange={setEntryTab}
+                      variant="band"
                       className="w-full sm:w-auto"
                       items={[
                         {
                           value: 'search',
-                          label: 'Lebensmittel-DB',
+                          label: 'Suche',
                           icon: Database,
                           activeIconClass: 'text-emerald-400',
                         },
@@ -3926,6 +3932,7 @@ export default function App() {
                     )}
                   </div>
 
+                  <div className="p-4 sm:p-5 space-y-4">
                   {/* -------------------------------------------------------- */}
                   {/* TAB 1: LEBENSMITTEL-DB + GRAMMATUR-RECHNER + BAUKASTEN   */}
                   {/* -------------------------------------------------------- */}
@@ -3972,41 +3979,6 @@ export default function App() {
 
                       {/* Quellen-Filter & Baukasten-Trigger */}
                       <div className="flex items-center justify-between gap-2 flex-wrap">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          {[
-                            { id: 'all', label: 'Alle Quellen' },
-                            {
-                              id: 'basis',
-                              label: `Basis-DB${
-                                searchQuery.trim() ? ` (${localBasisResults.length})` : ''
-                              }`,
-                            },
-                            {
-                              id: 'bls',
-                              label: `BLS${searchQuery.trim() ? ` (${blsResults.length})` : ''}`,
-                            },
-                            {
-                              id: 'off',
-                              label: `Open Food Facts${
-                                searchQuery.trim() ? ` (${offResults.length})` : ''
-                              }`,
-                            },
-                          ].map((pill) => (
-                            <button
-                              key={pill.id}
-                              type="button"
-                              onClick={() => setSourceFilter(pill.id)}
-                              className={`px-2.5 py-1 rounded-lg text-[11px] font-medium border transition ${
-                                sourceFilter === pill.id
-                                  ? 'bg-zinc-800 text-zinc-100 border-zinc-700'
-                                  : 'bg-zinc-950/60 text-zinc-400 border-zinc-800/80 hover:text-zinc-200'
-                              }`}
-                            >
-                              {pill.label}
-                            </button>
-                          ))}
-                        </div>
-
                         <button
                           type="button"
                           onClick={() => setIsBuilderOpen((v) => !v)}
@@ -4920,20 +4892,34 @@ export default function App() {
                       </div>
                     </form>
                   )}
-                </SpotlightCard>
+                  </div>
+                </div>
+                </section>
 
                 {/* Tagesprotokoll Liste */}
+                <section aria-labelledby="zone-protokoll" className="space-y-3">
+                <ZoneHeader
+                  id="zone-protokoll"
+                  title={`Protokoll · ${dateHeader.badge}`}
+                  right={
+                    <>
+                      <span>
+                        {dayLogs.length} {dayLogs.length === 1 ? 'Eintrag' : 'Einträge'}
+                        <span className="hidden sm:inline"> · {formatNumberDE(totals.calories)} kcal</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={handleCopyYesterday}
+                        disabled={yesterdayLogs.length === 0}
+                        className="md:hidden inline-flex items-center gap-1 h-8 px-2.5 rounded-lg border border-zinc-800 bg-zinc-900 text-zinc-300 disabled:opacity-40"
+                      >
+                        <Copy className="w-3.5 h-3.5 text-emerald-400" />
+                        Gestern
+                      </button>
+                    </>
+                  }
+                />
                 <SpotlightCard className="p-4 sm:p-5 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <Utensils className="w-4 h-4 text-emerald-400" />
-                      <h2 className="text-sm font-bold text-zinc-100">
-                        Tagesprotokoll ({dateHeader.badge})
-                      </h2>
-                      <Badge variant="secondary">{dayLogs.length}</Badge>
-                    </div>
-                  </div>
-
                   {dayLogs.length === 0 ? (
                     <div className="py-8 px-4 text-center rounded-xl bg-zinc-950/60 border border-dashed border-zinc-800 space-y-2">
                       <p className="text-xs text-zinc-400">
@@ -5005,20 +4991,22 @@ export default function App() {
                     </div>
                   )}
                 </SpotlightCard>
+                </section>
               </div>
 
               {/* RECHTE SPALTE: HABIT TRACKER & 7-TAGE-RÜCKBLICK (5 Spalten) */}
               <div
-                className={`lg:col-span-5 space-y-5 ${
+                className={`lg:col-span-5 space-y-8 sm:space-y-10 ${
                   mobileSection === 'food' ? 'hidden md:block' : 'block'
                 }`}
               >
                 {/* Tägliche Habits */}
-                <SpotlightCard className="p-4 sm:p-5 space-y-4">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <ClipboardCheck className="w-4 h-4 text-emerald-400" />
-                      <h2 className="text-sm font-bold text-zinc-100">Tägliche Habits</h2>
+                <section aria-labelledby="zone-habits" className="space-y-3">
+                <ZoneHeader
+                  id="zone-habits"
+                  title="Tägliche Habits"
+                  right={
+                    <>
                       <Badge
                         variant={
                           completedHabitsCount === appData.habits.length &&
@@ -5029,18 +5017,18 @@ export default function App() {
                       >
                         {completedHabitsCount}/{appData.habits.length}
                       </Badge>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() => setEditingHabits((v) => !v)}
-                      className="text-xs text-zinc-400 hover:text-zinc-100 flex items-center gap-1"
-                    >
-                      <Edit3 className="w-3 h-3" />
-                      <span>{editingHabits ? 'Fertig' : 'Anpassen'}</span>
-                    </button>
-                  </div>
-
+                      <button
+                        type="button"
+                        onClick={() => setEditingHabits((v) => !v)}
+                        className="inline-flex items-center gap-1 h-8 px-2 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-900"
+                      >
+                        <Edit3 className="w-3 h-3" />
+                        <span>{editingHabits ? 'Fertig' : 'Anpassen'}</span>
+                      </button>
+                    </>
+                  }
+                />
+                <SpotlightCard className="p-4 sm:p-5 space-y-4">
                   {/* Fortschrittsbalken der Tages-Habits */}
                   <ProgressBar
                     value={
@@ -5159,18 +5147,16 @@ export default function App() {
                     </form>
                   )}
                 </SpotlightCard>
+                </section>
 
                 {/* 7-Tage-Rückblick (Kalorien & Protein) */}
+                <section aria-labelledby="zone-rueckblick" className="space-y-3">
+                <ZoneHeader
+                  id="zone-rueckblick"
+                  title="7-Tage-Rückblick"
+                  right={<span>Ø {formatNumberDE(weeklyStats.avgCalories)} kcal</span>}
+                />
                 <SpotlightCard className="p-4 sm:p-5 space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <TrendingUp className="w-4 h-4 text-emerald-400" />
-                      <h2 className="text-sm font-bold text-zinc-100">7-Tage-Rückblick</h2>
-                    </div>
-                    <span className="text-[11px] text-zinc-400 tabular-nums">
-                      Ø {formatNumberDE(weeklyStats.avgCalories)} kcal
-                    </span>
-                  </div>
 
                   {/* Balkendiagramm */}
                   {(() => {
@@ -5266,9 +5252,10 @@ export default function App() {
                     </div>
                   </div>
                 </SpotlightCard>
+                </section>
               </div>
             </div>
-          </>
+          </div>
         )}
 
         {/* ================================================================== */}
