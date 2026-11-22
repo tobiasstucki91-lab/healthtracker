@@ -1,5 +1,6 @@
 // @ts-nocheck -- UI-Code aus Version 1, noch nicht typisiert (Sync-Module unter src/sync sind typisiert)
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { loadBlsIndex, searchIndex as searchBlsIndex } from './foods/bls';
 import {
   ChevronLeft,
   ChevronRight,
@@ -1930,6 +1931,7 @@ export default function App() {
   const [offResults, setOffResults] = useState([]);
   const [isSearchingOff, setIsSearchingOff] = useState(false);
   const [offError, setOffError] = useState(null);
+  const [blsResults, setBlsResults] = useState([]);
   const offErrorRef = useRef(null);
   offErrorRef.current = offError;
   const [offRetryNonce, setOffRetryNonce] = useState(0);
@@ -2124,8 +2126,8 @@ export default function App() {
           setOffResults([]);
           setOffError({
             text: offline
-              ? 'Offline – nur die Basis-DB ist verfügbar.'
-              : 'Open Food Facts ist gerade überlastet. Die Basis-DB bleibt aktiv.',
+              ? 'Offline – Basis-DB und BLS sind weiter verfügbar.'
+              : 'Open Food Facts ist gerade überlastet. Basis-DB und BLS bleiben verfügbar.',
             retry: !offline,
           });
         }
@@ -2157,6 +2159,26 @@ export default function App() {
     window.addEventListener('online', onOnline);
     return () => window.removeEventListener('online', onOnline);
   }, []);
+
+  // BLS 4.0 (offline, ~7.100 Lebensmittel): wird bei der ersten Suche geladen
+  useEffect(() => {
+    const trimmed = searchQuery.trim();
+    if (trimmed.length < 2 || /^\d{8,14}$/.test(trimmed)) {
+      setBlsResults([]);
+      return;
+    }
+    let cancelled = false;
+    loadBlsIndex()
+      .then((index) => {
+        if (!cancelled) setBlsResults(searchBlsIndex(index, trimmed, 30));
+      })
+      .catch(() => {
+        if (!cancelled) setBlsResults([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [searchQuery]);
 
   // Stufe 1: 0-ms Sofort-Filterung im deutschen Basis-Lexikon mit Synonym- & Relevanz-Ranking
   const localBasisResults = useMemo(() => {
@@ -2236,12 +2258,13 @@ export default function App() {
     showToast(`Barcode erkannt: ${code}`, null, 'emerald');
   };
 
-  // Gefilterte Suchergebnisse gemäß Filter-Pill ('all' | 'basis' | 'off')
+  // Gefilterte Suchergebnisse gemäß Filter-Pill ('all' | 'basis' | 'bls' | 'off')
   const filteredSearchResults = useMemo(() => {
     if (sourceFilter === 'basis') return localBasisResults;
+    if (sourceFilter === 'bls') return blsResults;
     if (sourceFilter === 'off') return offResults;
-    return [...localBasisResults, ...offResults];
-  }, [sourceFilter, localBasisResults, offResults]);
+    return [...localBasisResults, ...blsResults.slice(0, 12), ...offResults];
+  }, [sourceFilter, localBasisResults, blsResults, offResults]);
 
   const quickPickFoods = useMemo(() => {
     return QUICK_PICK_IDS.map((id) => GERMAN_BASIS_FOODS.find((f) => f.id === id)).filter(Boolean);
@@ -3430,7 +3453,7 @@ export default function App() {
         </nav>
 
         <div className="mt-auto px-2 text-[11px] leading-relaxed text-zinc-500">
-          Lebensmittel: BLS &amp; Open Food Facts
+          Lebensmittel: Bundeslebensmittelschlüssel 4.0 (Max Rubner-Institut, CC BY 4.0) &amp; Open Food Facts (ODbL)
         </div>
       </aside>
 
@@ -3949,7 +3972,7 @@ export default function App() {
 
                       {/* Quellen-Filter & Baukasten-Trigger */}
                       <div className="flex items-center justify-between gap-2 flex-wrap">
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex items-center gap-1.5 flex-wrap">
                           {[
                             { id: 'all', label: 'Alle Quellen' },
                             {
@@ -3957,6 +3980,10 @@ export default function App() {
                               label: `Basis-DB${
                                 searchQuery.trim() ? ` (${localBasisResults.length})` : ''
                               }`,
+                            },
+                            {
+                              id: 'bls',
+                              label: `BLS${searchQuery.trim() ? ` (${blsResults.length})` : ''}`,
                             },
                             {
                               id: 'off',
@@ -4010,7 +4037,11 @@ export default function App() {
                                 </span>
                                 <Badge
                                   variant={
-                                    selectedFood.source === 'basis' ? 'emerald' : 'sky'
+                                    selectedFood.source === 'basis'
+                                      ? 'emerald'
+                                      : selectedFood.source === 'bls'
+                                      ? 'amber'
+                                      : 'sky'
                                   }
                                 >
                                   {selectedFood.brand ||
@@ -4307,7 +4338,11 @@ export default function App() {
                                       </span>
                                       <Badge
                                         variant={
-                                          food.source === 'basis' ? 'emerald' : 'sky'
+                                          food.source === 'basis'
+                                            ? 'emerald'
+                                            : food.source === 'bls'
+                                            ? 'amber'
+                                            : 'sky'
                                         }
                                       >
                                         {food.brand ||

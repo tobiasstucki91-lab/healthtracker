@@ -11,6 +11,18 @@ Persönlicher Kalorien-, Makro-, Habit- und Gewichtstracker als installierbare W
 - **In Drive:** Ordner `Health Habit Tracker` mit `health-habit-tracker-sync.json` und Tages-Backups der letzten 14 Tage (`backup-JJJJ-MM-TT.json`). Die App hat nur Zugriff auf Dateien, die sie selbst angelegt hat (Zugriffsrecht `drive.file`).
 - **Zurücksetzen / Import:** Danach pausiert der Sync, und du entscheidest im Banner: „Hochladen" (dieser Stand gilt überall) oder „Drive-Stand laden".
 
+## Lebensmitteldaten
+
+| Quelle | Inhalt | Verfügbarkeit |
+|---|---|---|
+| **Basis-DB** | ca. 160 häufige Lebensmittel mit Portionsgrößen | in der App, offline |
+| **BLS 4.0** | ca. 7.100 Grundlebensmittel und Gerichte (Bundeslebensmittelschlüssel) | in der App, offline (wird bei der ersten Suche geladen) |
+| **Open Food Facts** | Markenprodukte, Barcode-Scan | online; Ergebnisse werden lokal zwischengespeichert |
+
+Quellenangaben:
+- Max Rubner-Institut (2025): Bundeslebensmittelschlüssel (BLS), Version 4.0 – Deutsche Nährstoffdatenbank. Karlsruhe. DOI: [10.25826/Data20251217-134202-0](https://doi.org/10.25826/Data20251217-134202-0). Lizenz: [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/deed.de). In `src/data/bls-4.0.json` ist ein Auszug enthalten (Energie, Protein, Kohlenhydrate, Fett, Ballaststoffe, Zucker je 100 g).
+- [Open Food Facts](https://world.openfoodfacts.org), Datenbank unter [ODbL](https://opendatacommons.org/licenses/odbl/1-0/).
+
 ## Einmalige Einrichtung
 
 ### 1. App hosten (GitHub Pages, kostenlos)
@@ -70,5 +82,7 @@ npm run build
 | `src/sync/model.ts` | Datenmodell für den Sync: Records, Zeitstempel, Tombstones, Merge |
 | `src/sync/drive.ts` | Google-Anmeldung (OAuth-Redirect) und Drive-Dateizugriff |
 | `src/sync/useSyncedAppData.ts` | React-Hook: lokale Speicherung, Sync beim Öffnen/Schließen |
+| `src/foods/bls.ts` | BLS 4.0: Laden und Suche (mit Synonymen und Stückgewichten) |
+| `src/data/bls-4.0.json` | BLS-4.0-Auszug (CC BY 4.0, Max Rubner-Institut) |
 | `src/components/SyncUi.tsx` | Sync-Button, Hinweis-Banner, Einstellungen |
 | `health_habit_tracker.tsx` | Originaldatei (Version 1) als Referenz |
