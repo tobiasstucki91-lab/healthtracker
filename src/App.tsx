@@ -605,7 +605,7 @@ function SegmentedTabs({ items, value, onValueChange, className = '', variant = 
       role="tablist"
       className={
         band
-          ? `grid grid-cols-4 sm:flex items-stretch gap-1 ${className}`
+          ? `grid ${className.includes('grid-cols-3') ? '' : 'grid-cols-4 sm:flex'} items-stretch gap-1 ${className}`
           : `inline-flex flex-wrap sm:flex-nowrap items-center gap-1 rounded-xl bg-zinc-950/90 p-1 border border-zinc-800/90 ${className}`
       }
     >
@@ -756,7 +756,7 @@ function ModalDialog({ open, onOpenChange, title, description, children }) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-zinc-950/80 backdrop-blur-md animate-fadeIn"
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 pt-[max(0.75rem,env(safe-area-inset-top))] bg-zinc-950/80 backdrop-blur-md animate-fadeIn"
       onClick={() => onOpenChange(false)}
     >
       <div
@@ -764,10 +764,10 @@ function ModalDialog({ open, onOpenChange, title, description, children }) {
         aria-modal="true"
         aria-labelledby="radix-dialog-title"
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-lg overflow-hidden rounded-2xl bg-zinc-900 border border-zinc-800 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.85)]"
+        className="w-full max-w-lg flex flex-col max-h-[calc(100dvh-0.75rem)] sm:max-h-[calc(100dvh-2rem)] overflow-hidden rounded-t-2xl sm:rounded-2xl bg-zinc-900 border border-zinc-800 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.85)]"
       >
-        <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-zinc-800/90">
-          <div>
+        <div className="shrink-0 flex items-start justify-between gap-3 px-5 py-4 border-b border-zinc-800/90">
+          <div className="min-w-0">
             <h3
               id="radix-dialog-title"
               className="text-base font-semibold tracking-tight text-zinc-100 flex items-center gap-2"
@@ -783,12 +783,14 @@ function ModalDialog({ open, onOpenChange, title, description, children }) {
             type="button"
             onClick={() => onOpenChange(false)}
             aria-label="Dialog schließen"
-            className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition"
+            className="shrink-0 w-10 h-10 -mr-2 -mt-1 flex items-center justify-center rounded-xl text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
-        <div>{children}</div>
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain pb-[env(safe-area-inset-bottom)]">
+          {children}
+        </div>
       </div>
     </div>
   );
@@ -6084,7 +6086,8 @@ export default function App() {
           <SegmentedTabs
             value={settingsTab}
             onValueChange={setSettingsTab}
-            className="w-full"
+            variant="band"
+            className="w-full grid-cols-3 sm:grid sm:grid-cols-3 p-1 rounded-xl bg-zinc-950/90 border border-zinc-800"
             items={[
               { value: 'targets', label: 'Tagesziele', icon: Target },
               { value: 'gdrive', label: 'Google Drive', icon: Cloud },
@@ -6206,7 +6209,7 @@ export default function App() {
                           >
                             {RATE_OPTIONS.map((r) => (
                               <option key={r.value} value={r.value}>
-                                {r.label} ({r.value.toLocaleString('de-DE')} % Körpergewicht)
+                                {r.label} ({r.value.toLocaleString('de-DE')} %)
                               </option>
                             ))}
                           </select>
