@@ -1501,11 +1501,199 @@ function parseOpenScaleCsv(csvText) {
   return parsedEntries;
 }
 
-function escapeLuceneSearchQuery(query) {
-  return query
-    .replace(/[+\-=&|><!(){}[\]^"~*?:\\/]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+// ============================================================================
+// OPEN FOOD FACTS: ROBUSTER ABRUF (RETRY + CACHE)
+// ============================================================================
+// Open Food Facts ist ein ehrenamtlich betriebener Dienst.
+// - Die schnelle Suche (search.openfoodfacts.org) erlaubt keine Aufrufe aus
+//   fremden Web-Apps (kein CORS-Header) und ist für uns daher nicht nutzbar.
+// - Die Volltextsuche (cgi/search.pl) liefert oft "503 überlastet" und ist auf
+//   ~10 Anfragen/Minute begrenzt; die Produkt-API blockt kurze Serien mit 429.
+// Darum: wiederholen bei vorübergehenden Fehlern, Ergebnisse lokal merken.
+
+const OFF_FIELDS =
+  'code,product_name,product_name_de,brands,nutriments,serving_size,serving_quantity,nutrition_grades,nutriscore_grade';
+const OFF_CACHE_KEY = 'hht_off_cache_v1';
+const OFF_CACHE_MAX = 80;
+const OFF_CACHE_FRESH_MS = 3 * 24 * 60 * 60 * 1000;
+
+class OffHttpError extends Error {
+  constructor(status) {
+    super(`HTTP ${status}`);
+    this.status = status;
+  }
+}
+
+const isTransientOffError = (err) =>
+  err && err.name !== 'AbortError' && (!(err instanceof OffHttpError) || err.status === 429 || err.status >= 500);
+
+function waitWithSignal(ms, signal) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(t);
+        reject(new DOMException('Aborted', 'AbortError'));
+      },
+      { once: true }
+    );
+  });
+}
+
+const OFF_BACKOFF_MS = [1000, 2500, 5000];
+
+// Einzelner Abruf mit eigenem Timeout und Wiederholung bei 429/5xx/Netzfehler
+async function offFetchJson(url, signal, { retries = 2, timeoutMs = 8000 } = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    if (attempt > 0) await waitWithSignal(OFF_BACKOFF_MS[attempt - 1] ?? 4000, signal);
+    const ctrl = new AbortController();
+    const onAbort = () => ctrl.abort();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { signal: ctrl.signal });
+      if (!res.ok) throw new OffHttpError(res.status);
+      return await res.json();
+    } catch (err) {
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      // Eigenes Timeout zählt als vorübergehender Fehler
+      lastErr = err.name === 'AbortError' ? new Error('Timeout') : err;
+      if (!isTransientOffError(lastErr)) throw lastErr;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    }
+  }
+  throw lastErr;
+}
+
+function readOffCache() {
+  try {
+    return JSON.parse(localStorage.getItem(OFF_CACHE_KEY) || '{}') || {};
+  } catch {
+    return {};
+  }
+}
+
+function getOffCache(key) {
+  const entry = readOffCache()[key];
+  if (!entry || !Array.isArray(entry.results)) return null;
+  return { results: entry.results, fresh: Date.now() - entry.t < OFF_CACHE_FRESH_MS };
+}
+
+// Durchsucht alle früher geladenen Produkte (für Ausfälle von Open Food Facts)
+function searchOffCacheLocal(query) {
+  const tokens = normalizeSearchText(query).split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return [];
+  const seen = new Set();
+  const out = [];
+  for (const entry of Object.values(readOffCache())) {
+    for (const item of entry?.results || []) {
+      if (!item || seen.has(item.id)) continue;
+      const hay = normalizeSearchText(`${item.name} ${item.brand || ''}`);
+      if (tokens.every((t) => hay.includes(t))) {
+        seen.add(item.id);
+        out.push(item);
+      }
+    }
+  }
+  return out.slice(0, 15);
+}
+
+function putOffCache(key, results) {
+  try {
+    const cache = readOffCache();
+    cache[key] = { t: Date.now(), results };
+    const keys = Object.keys(cache);
+    if (keys.length > OFF_CACHE_MAX) {
+      keys
+        .sort((a, b) => cache[a].t - cache[b].t)
+        .slice(0, keys.length - OFF_CACHE_MAX)
+        .forEach((k) => delete cache[k]);
+    }
+    localStorage.setItem(OFF_CACHE_KEY, JSON.stringify(cache));
+  } catch {
+    // Speicher voll o. ä.: Cache ist optional
+  }
+}
+
+// Barcode-Lookup über die Produkt-API (mit Wiederholungen)
+async function offLookupBarcode(code, signal) {
+  try {
+    const data = await offFetchJson(
+      `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json?fields=${OFF_FIELDS}`,
+      signal,
+      { retries: 3 }
+    );
+    if (data.status === 1 && data.product) return { found: true, product: data.product };
+    return { found: false };
+  } catch (err) {
+    if (err instanceof OffHttpError && err.status === 404) return { found: false };
+    throw err;
+  }
+}
+
+// Textsuche über die Volltextsuche (mit Wiederholungen bei Überlastung)
+async function offSearchText(query, signal) {
+  const data = await offFetchJson(
+    `https://de.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(
+      query
+    )}&search_simple=1&action=process&json=1&page_size=20&fields=${OFF_FIELDS}`,
+    signal,
+    { retries: 3, timeoutMs: 10000 }
+  );
+  const products = Array.isArray(data.products) ? data.products : [];
+  const parsedList = products.map(parseOpenFoodFactsProduct).filter(Boolean);
+
+  const queryLower = query.toLowerCase();
+  parsedList.sort((a, b) => {
+    const aMatch = a.name.toLowerCase().includes(queryLower) ? 0 : 1;
+    const bMatch = b.name.toLowerCase().includes(queryLower) ? 0 : 1;
+    if (aMatch !== bMatch) return aMatch - bMatch;
+    return (a.hasGermanName ? 0 : 1) - (b.hasGermanName ? 0 : 1);
+  });
+  return parsedList.slice(0, 15);
+}
+
+// ============================================================================
+// STÜCK-ANGABEN: "1 Ei (60g)" -> 60 g pro Stück
+// ============================================================================
+
+const MEASURE_NOUNS = new Set([
+  'Portion', 'EL', 'TL', 'Glas', 'Tasse', 'Becher', 'Scoop', 'Handvoll', 'Dose', 'Flasche',
+  'Packung', 'Scheibe', 'Block', 'Riegel',
+]);
+const NOUN_SINGULAR = { Scheiben: 'Scheibe', Stücke: 'Stück', Portionen: 'Portion', Gläser: 'Glas' };
+
+// Liefert { label, grams } für eine zählbare Einheit oder null
+function getPieceUnit(food) {
+  if (!food) return null;
+  const qty = Number(food.servingQuantity);
+  const m = String(food.servingSize || '').match(
+    /^\s*(\d+(?:[.,]\d+)?)\s+([A-Za-zÄÖÜäöüß]+)[^(]*\(\s*(\d+(?:[.,]\d+)?)\s*(g|ml)\s*\)/
+  );
+  if (m) {
+    const count = parseFloat(m[1].replace(',', '.'));
+    const total = parseFloat(m[3].replace(',', '.'));
+    if (count > 0 && total > 0) {
+      const noun = NOUN_SINGULAR[m[2]] || m[2];
+      const isMeasure = MEASURE_NOUNS.has(noun);
+      return {
+        label: isMeasure ? noun : 'Stk.',
+        hint: isMeasure ? null : noun,
+        grams: Math.round((total / count) * 10) / 10,
+        natural: !isMeasure,
+      };
+    }
+  }
+  if (qty > 0) return { label: 'Portion', hint: null, grams: qty, natural: false };
+  return null;
+}
+
+function formatAmountDE(num) {
+  return Number(num).toLocaleString('de-DE', { maximumFractionDigits: 2 });
 }
 
 function parseOpenFoodFactsProduct(raw) {
@@ -1742,10 +1930,15 @@ export default function App() {
   const [offResults, setOffResults] = useState([]);
   const [isSearchingOff, setIsSearchingOff] = useState(false);
   const [offError, setOffError] = useState(null);
+  const offErrorRef = useRef(null);
+  offErrorRef.current = offError;
+  const [offRetryNonce, setOffRetryNonce] = useState(0);
 
   // Grammatur-Rechner State
   const [selectedFood, setSelectedFood] = useState(null);
   const [gramsInput, setGramsInput] = useState('100');
+  const [amountUnit, setAmountUnit] = useState('g');
+  const [unitCountInput, setUnitCountInput] = useState('1');
   const [saveFoodAsFav, setSaveFoodAsFav] = useState(false);
 
   // Mahlzeiten Baukasten State (integriert in Tab 1)
@@ -1869,123 +2062,74 @@ export default function App() {
   useEffect(() => {
     const trimmed = searchQuery.trim();
 
-    if (trimmed.length < 2) {
+    if (trimmed.length < 3) {
       setOffResults([]);
       setIsSearchingOff(false);
       setOffError(null);
       return;
     }
 
+    const isCode = /^\d{8,14}$/.test(trimmed);
+    const cacheKey = isCode ? `ean:${trimmed}` : `q:${trimmed.toLowerCase()}`;
+    const cached = getOffCache(cacheKey);
+
+    // Frischer Treffer im lokalen Cache: sofort anzeigen, kein Netzabruf
+    if (cached && cached.fresh && offRetryNonce === 0) {
+      setOffResults(cached.results);
+      setIsSearchingOff(false);
+      setOffError(isCode && cached.results.length === 0 ? `Kein Produkt für Barcode ${trimmed} gefunden.` : null);
+      return;
+    }
+
     const controller = new AbortController();
-    const delayMs = /^\d{8,14}$/.test(trimmed) ? 200 : 450;
-    const fieldsParam =
-      'code,product_name,product_name_de,brands,nutriments,serving_size,serving_quantity,nutrition_grades,nutriscore_grade';
+    const delayMs = isCode ? 150 : 600;
 
     const timer = setTimeout(async () => {
       setIsSearchingOff(true);
       setOffError(null);
-
-      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      if (cached) setOffResults(cached.results);
 
       try {
-        if (/^\d{8,14}$/.test(trimmed)) {
-          const url = `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(
-            trimmed
-          )}.json?fields=${fieldsParam}`;
-
-          const res = await fetch(url, { signal: controller.signal });
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          const data = await res.json();
-
-          if (data.status === 1 && data.product) {
-            const parsed = parseOpenFoodFactsProduct(data.product);
+        if (isCode) {
+          const result = await offLookupBarcode(trimmed, controller.signal);
+          if (result.found) {
+            const parsed = parseOpenFoodFactsProduct(result.product);
             setOffResults(parsed ? [parsed] : []);
-            if (!parsed) {
-              setOffError('Barcode gefunden, aber keine Nährwerte hinterlegt.');
-            }
+            if (parsed) putOffCache(cacheKey, [parsed]);
+            else setOffError('Barcode gefunden, aber keine Nährwerte hinterlegt.');
           } else {
             setOffResults([]);
+            putOffCache(cacheKey, []);
             setOffError(`Kein Produkt für Barcode ${trimmed} gefunden.`);
           }
         } else {
-          const safeQuery = escapeLuceneSearchQuery(trimmed) || trimmed;
-          let parsedList = [];
-
-          try {
-            // Primär: Schnelle Elasticsearch-API (Search-a-licious)
-            const salUrl = `https://search.openfoodfacts.org/search?q=${encodeURIComponent(
-              safeQuery
-            )}&page_size=20&fields=${fieldsParam}`;
-
-            const res = await fetch(salUrl, { signal: controller.signal });
-            if (!res.ok) throw new Error(`Search-a-licious HTTP ${res.status}`);
-            const data = await res.json();
-
-            const rawHits = Array.isArray(data.hits)
-              ? data.hits
-              : Array.isArray(data.products)
-              ? data.products
-              : [];
-
-            parsedList = rawHits.map(parseOpenFoodFactsProduct).filter(Boolean);
-
-            // Falls Hits ohne eingebettete Nutriments geliefert wurden, per Batch-Code nachladen
-            if (rawHits.length > 0 && parsedList.length === 0) {
-              const codes = rawHits
-                .map((h) => h.code)
-                .filter(Boolean)
-                .slice(0, 15);
-              if (codes.length > 0) {
-                const hydrateUrl = `https://world.openfoodfacts.org/api/v2/search?code=${encodeURIComponent(
-                  codes.join(',')
-                )}&fields=${fieldsParam}`;
-                const hydrateRes = await fetch(hydrateUrl, { signal: controller.signal });
-                if (hydrateRes.ok) {
-                  const hydrateData = await hydrateRes.json();
-                  const hydratedProducts = Array.isArray(hydrateData.products)
-                    ? hydrateData.products
-                    : [];
-                  parsedList = hydratedProducts
-                    .map(parseOpenFoodFactsProduct)
-                    .filter(Boolean);
-                }
-              }
-            }
-          } catch (primaryErr) {
-            if (primaryErr.name === 'AbortError') throw primaryErr;
-          }
-
-          // Fallback: Deutschsprachige Volltextsuche (cgi/search.pl), falls Search-a-licious 0 Treffer liefert
-          if (parsedList.length === 0) {
-            const cgiUrl = `https://de.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(
-              trimmed
-            )}&search_simple=1&action=process&json=1&page_size=15&fields=${fieldsParam}`;
-            const fallbackRes = await fetch(cgiUrl, { signal: controller.signal });
-            if (!fallbackRes.ok) throw new Error(`OFF Search HTTP ${fallbackRes.status}`);
-            const fallbackData = await fallbackRes.json();
-
-            const products = Array.isArray(fallbackData.products) ? fallbackData.products : [];
-            parsedList = products.map(parseOpenFoodFactsProduct).filter(Boolean);
-          }
-
-          // Relevanz-Sortierung: Deutsche Produktnamen & direkte Worttreffer zuerst
-          const queryLower = trimmed.toLowerCase();
-          parsedList.sort((a, b) => {
-            const aMatch = a.name.toLowerCase().includes(queryLower) ? 0 : 1;
-            const bMatch = b.name.toLowerCase().includes(queryLower) ? 0 : 1;
-            if (aMatch !== bMatch) return aMatch - bMatch;
-            const aDe = a.hasGermanName ? 0 : 1;
-            const bDe = b.hasGermanName ? 0 : 1;
-            return aDe - bDe;
-          });
-
-          setOffResults(parsedList.slice(0, 15));
+          const results = await offSearchText(trimmed, controller.signal);
+          setOffResults(results);
+          if (results.length > 0) putOffCache(cacheKey, results);
         }
       } catch (err) {
         if (err.name === 'AbortError') return;
-        setOffError('Open Food Facts momentan nicht erreichbar – Basis-DB bleibt aktiv.');
+        const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
+        // Kein exakter Cache-Treffer: in allen früher geladenen Produkten suchen
+        const fallback = cached ? cached.results : isCode ? [] : searchOffCacheLocal(trimmed);
+        if (fallback.length > 0) {
+          setOffResults(fallback);
+          setOffError({
+            text: offline
+              ? 'Offline – zeige gespeicherte Ergebnisse.'
+              : 'Open Food Facts gerade überlastet – zeige gespeicherte Ergebnisse.',
+            retry: !offline,
+          });
+        } else {
+          setOffResults([]);
+          setOffError({
+            text: offline
+              ? 'Offline – nur die Basis-DB ist verfügbar.'
+              : 'Open Food Facts ist gerade überlastet. Die Basis-DB bleibt aktiv.',
+            retry: !offline,
+          });
+        }
       } finally {
-        clearTimeout(timeoutId);
         if (!controller.signal.aborted) {
           setIsSearchingOff(false);
         }
@@ -1996,7 +2140,23 @@ export default function App() {
       clearTimeout(timer);
       controller.abort();
     };
+  }, [searchQuery, offRetryNonce]);
+
+  // Neue Suchanfrage: manuellen Retry-Zähler zurücksetzen
+  useEffect(() => {
+    setOffRetryNonce(0);
   }, [searchQuery]);
+
+  // Wieder online: fehlgeschlagene Suche automatisch erneut ausführen
+  useEffect(() => {
+    const onOnline = () => {
+      if (offErrorRef.current && typeof offErrorRef.current === 'object') {
+        setOffRetryNonce((n) => n + 1);
+      }
+    };
+    window.addEventListener('online', onOnline);
+    return () => window.removeEventListener('online', onOnline);
+  }, []);
 
   // Stufe 1: 0-ms Sofort-Filterung im deutschen Basis-Lexikon mit Synonym- & Relevanz-Ranking
   const localBasisResults = useMemo(() => {
@@ -2090,7 +2250,11 @@ export default function App() {
   // Live-Berechnung im Grammatur-Rechner
   const calculatedFoodMacros = useMemo(() => {
     if (!selectedFood) return null;
-    const grams = Math.max(0, parseFloat(gramsInput) || 0);
+    const unit = amountUnit === 'unit' ? getPieceUnit(selectedFood) : null;
+    const count = Math.max(0, parseFloat(String(unitCountInput).replace(',', '.')) || 0);
+    const grams = unit
+      ? Math.round(count * unit.grams * 10) / 10
+      : Math.max(0, parseFloat(gramsInput) || 0);
     const factor = grams / 100;
     return {
       grams,
@@ -2099,7 +2263,9 @@ export default function App() {
       carbs: Math.round(selectedFood.carbs * factor * 10) / 10,
       fat: Math.round(selectedFood.fat * factor * 10) / 10,
     };
-  }, [selectedFood, gramsInput]);
+  }, [selectedFood, gramsInput, amountUnit, unitCountInput]);
+
+  const selectedPieceUnit = useMemo(() => getPieceUnit(selectedFood), [selectedFood]);
 
   // Summierte Makros & Gesamtgewicht im Mahlzeiten-Baukasten
   const mealBuilderTotals = useMemo(() => {
@@ -2611,6 +2777,8 @@ export default function App() {
   const handleSelectFoodForCalculator = (food) => {
     setSelectedFood(food);
     setGramsInput('100');
+    setUnitCountInput('1');
+    setAmountUnit(getPieceUnit(food)?.natural ? 'unit' : 'g');
     setSaveFoodAsFav(false);
   };
 
@@ -2618,7 +2786,10 @@ export default function App() {
     if (!selectedFood || !calculatedFoodMacros || calculatedFoodMacros.grams <= 0) return;
 
     const gramsRounded = Math.round(calculatedFoodMacros.grams);
-    const label = `${gramsRounded}g ${selectedFood.name}`;
+    const unit = amountUnit === 'unit' ? selectedPieceUnit : null;
+    const label = unit
+      ? `${formatAmountDE(parseFloat(String(unitCountInput).replace(',', '.')) || 0)} ${unit.label} ${selectedFood.name} (${gramsRounded}g)`
+      : `${gramsRounded}g ${selectedFood.name}`;
 
     addMealEntry(
       {
@@ -2641,6 +2812,8 @@ export default function App() {
     const grams =
       customGrams !== null
         ? customGrams
+        : food === selectedFood && calculatedFoodMacros && calculatedFoodMacros.grams > 0
+        ? Math.max(1, Math.round(calculatedFoodMacros.grams))
         : Math.max(1, Math.round(parseFloat(gramsInput) || 100));
 
     setMealBuilderItems((prev) => [
@@ -3880,8 +4053,61 @@ export default function App() {
                             </button>
                           </div>
 
-                          {/* Mengen-Presets & Grammatur-Eingabe */}
+                          {/* Mengen-Presets & Eingabe (Gramm oder Stück) */}
                           <div className="space-y-2">
+                            {selectedPieceUnit && (
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <div className="inline-flex p-0.5 rounded-lg bg-zinc-900 border border-zinc-800">
+                                  {[['g', 'Gramm'], ['unit', selectedPieceUnit.label]].map(([key, text]) => (
+                                    <button
+                                      key={key}
+                                      type="button"
+                                      onClick={() => {
+                                        if (key === amountUnit) return;
+                                        if (key === 'unit') {
+                                          const g = parseFloat(gramsInput) || 0;
+                                          const n = g > 0 ? Math.max(0.5, Math.round((g / selectedPieceUnit.grams) * 2) / 2) : 1;
+                                          setUnitCountInput(String(n));
+                                        } else if (calculatedFoodMacros && calculatedFoodMacros.grams > 0) {
+                                          setGramsInput(String(Math.round(calculatedFoodMacros.grams)));
+                                        }
+                                        setAmountUnit(key);
+                                      }}
+                                      className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition ${
+                                        amountUnit === key ? 'bg-zinc-200 text-zinc-950' : 'text-zinc-400 hover:text-zinc-100'
+                                      }`}
+                                    >
+                                      {text}
+                                    </button>
+                                  ))}
+                                </div>
+                                <span className="text-[11px] text-zinc-500 tabular-nums">
+                                  1 {selectedPieceUnit.hint || selectedPieceUnit.label} = {formatAmountDE(selectedPieceUnit.grams)} g
+                                  {amountUnit === 'unit' && calculatedFoodMacros && (
+                                    <span className="text-zinc-300"> · gesamt {formatAmountDE(Math.round(calculatedFoodMacros.grams))} g</span>
+                                  )}
+                                </span>
+                              </div>
+                            )}
+
+                            {amountUnit === 'unit' && selectedPieceUnit ? (
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                {[0.5, 1, 2, 3, 4, 5, 6].map((n) => (
+                                  <button
+                                    key={n}
+                                    type="button"
+                                    onClick={() => setUnitCountInput(String(n))}
+                                    className={`px-2.5 py-1 rounded-lg text-[11px] font-medium tabular-nums border transition ${
+                                      parseFloat(String(unitCountInput).replace(',', '.')) === n
+                                        ? 'bg-zinc-200 text-zinc-950 border-zinc-200 font-bold'
+                                        : 'bg-zinc-900 text-zinc-300 border-zinc-800 hover:border-zinc-700'
+                                    }`}
+                                  >
+                                    {n === 0.5 ? '½' : n}
+                                  </button>
+                                ))}
+                              </div>
+                            ) : (
                             <div className="flex items-center gap-1.5 flex-wrap">
                               {selectedFood.servingQuantity && (
                                 <button
@@ -3915,19 +4141,24 @@ export default function App() {
                                 </button>
                               ))}
                             </div>
+                            )}
 
                             <div className="flex items-center gap-3">
                               <div className="relative w-32">
                                 <input
                                   type="number"
-                                  min="1"
-                                  step="1"
-                                  value={gramsInput}
-                                  onChange={(e) => setGramsInput(e.target.value)}
-                                  className="w-full pl-3 pr-8 py-2 text-sm font-bold tabular-nums bg-zinc-900 border border-zinc-700 rounded-xl text-zinc-100 focus:outline-none focus:border-emerald-500"
+                                  min="0"
+                                  step={amountUnit === 'unit' && selectedPieceUnit ? '0.5' : '1'}
+                                  value={amountUnit === 'unit' && selectedPieceUnit ? unitCountInput : gramsInput}
+                                  onChange={(e) =>
+                                    amountUnit === 'unit' && selectedPieceUnit
+                                      ? setUnitCountInput(e.target.value)
+                                      : setGramsInput(e.target.value)
+                                  }
+                                  className="w-full pl-3 pr-16 py-2 text-sm font-bold tabular-nums bg-zinc-900 border border-zinc-700 rounded-xl text-zinc-100 focus:outline-none focus:border-emerald-500"
                                 />
                                 <span className="text-xs text-zinc-400 absolute right-3 top-1/2 -translate-y-1/2">
-                                  g
+                                  {amountUnit === 'unit' && selectedPieceUnit ? selectedPieceUnit.label : 'g'}
                                 </span>
                               </div>
 
@@ -4044,7 +4275,17 @@ export default function App() {
                           {offError && (
                             <div className="flex items-center gap-2 p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/25 text-[11px] text-amber-200">
                               <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                              <span>{offError}</span>
+                              <span className="flex-1">{typeof offError === 'string' ? offError : offError.text}</span>
+                              {typeof offError === 'object' && offError.retry && (
+                                <button
+                                  type="button"
+                                  onClick={() => setOffRetryNonce((n) => n + 1)}
+                                  className="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-200 hover:bg-amber-500/25 font-semibold"
+                                >
+                                  <RefreshCw className="w-3 h-3" />
+                                  Erneut
+                                </button>
+                              )}
                             </div>
                           )}
 
