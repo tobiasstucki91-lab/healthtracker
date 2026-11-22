@@ -2,6 +2,13 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { loadBlsIndex, searchIndex as searchBlsIndex } from './foods/bls';
 import {
+  estimateEnergy,
+  weeklySuggestion,
+  normalizeProfile,
+  ACTIVITY_LEVELS,
+  RATE_OPTIONS,
+} from './energy/adaptive';
+import {
   ChevronLeft,
   ChevronRight,
   ChevronDown,
@@ -505,6 +512,12 @@ function SpotlightCard({
     </div>
   );
 }
+
+const ENERGY_FIELD_CLS =
+  'w-full px-3 py-2 text-xs font-bold tabular-nums bg-zinc-950 border border-zinc-800 rounded-xl text-zinc-100 focus:outline-none focus:border-emerald-500';
+
+const formatKgDelta = (kg) =>
+  `${kg > 0 ? '+' : ''}${kg.toLocaleString('de-DE', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}`;
 
 /**
  * Überschrift eines Bereichs (Tagesbilanz, Essen hinzufügen …): steht über der
@@ -2079,10 +2092,67 @@ export default function App() {
     }, 150);
   }, []);
 
+  // ==========================================================================
+  // ADAPTIVES KALORIENZIEL
+  // ==========================================================================
+  const [energyForm, setEnergyForm] = useState(() => normalizeProfile(appData.targets.energy));
+  const todayKeyForEnergy = getTodayKey();
+
+  const intakeByDate = useMemo(() => {
+    const out = {};
+    for (const [date, list] of Object.entries(appData.logsByDate || {})) {
+      out[date] = (Array.isArray(list) ? list : []).reduce(
+        (sum, e) => sum + (Number(e?.calories) || 0),
+        0
+      );
+    }
+    return out;
+  }, [appData.logsByDate]);
+
+  const energyProfile = useMemo(
+    () => normalizeProfile(appData.targets.energy),
+    [appData.targets.energy]
+  );
+
+  const energyEstimate = useMemo(
+    () =>
+      energyProfile.enabled
+        ? estimateEnergy({
+            profile: energyProfile,
+            weightsByDate: appData.weightsByDate || {},
+            intakeByDate,
+            today: todayKeyForEnergy,
+            currentTarget: appData.targets.calories,
+          })
+        : null,
+    [energyProfile, appData.weightsByDate, intakeByDate, todayKeyForEnergy, appData.targets.calories]
+  );
+
+  const energySuggestion = useMemo(
+    () => weeklySuggestion(energyEstimate, energyProfile, appData.targets.calories, todayKeyForEnergy),
+    [energyEstimate, energyProfile, appData.targets.calories, todayKeyForEnergy]
+  );
+
+  // Vorschau im Einstellungs-Dialog (mit den gerade eingegebenen Profilwerten)
+  const energyPreview = useMemo(
+    () =>
+      isSettingsOpen && energyForm.enabled
+        ? estimateEnergy({
+            profile: normalizeProfile(energyForm),
+            weightsByDate: appData.weightsByDate || {},
+            intakeByDate,
+            today: todayKeyForEnergy,
+            currentTarget: appData.targets.calories,
+          })
+        : null,
+    [isSettingsOpen, energyForm, appData.weightsByDate, intakeByDate, todayKeyForEnergy, appData.targets.calories]
+  );
+
   // Synchronisiere Einstellungs-Formular beim Öffnen
   useEffect(() => {
     if (isSettingsOpen) {
       setTargetForm(appData.targets);
+      setEnergyForm(normalizeProfile(appData.targets.energy));
       setConfirmReset(false);
       setImportFeedback(null);
     }
@@ -3262,9 +3332,13 @@ export default function App() {
         ? parseWeightNumber(targetForm.weight)
         : null;
 
+    const energy = normalizeProfile(energyForm);
+    if (energy.enabled) energy.lastReview = getTodayKey();
     setAppData((prev) => ({
       ...prev,
       targets: {
+        ...prev.targets,
+        energy,
         calories: Math.max(500, Math.round(Number(targetForm.calories) || 1900)),
         protein: Math.max(10, Math.round(Number(targetForm.protein) || 160)),
         carbs: Math.max(0, Math.round(Number(targetForm.carbs) || 175)),
@@ -3274,6 +3348,33 @@ export default function App() {
     }));
     setIsSettingsOpen(false);
     showToast('Tagesziele gespeichert', null, 'emerald');
+  };
+
+  const handleApplyEnergyPreview = () => {
+    if (!energyPreview) return;
+    setTargetForm((prev) => ({
+      ...prev,
+      calories: energyPreview.calories,
+      protein: energyPreview.protein,
+      carbs: energyPreview.carbs,
+      fat: energyPreview.fat,
+    }));
+  };
+
+  const markEnergyReviewed = (extraTargets = {}) =>
+    setAppData((prev) => ({
+      ...prev,
+      targets: {
+        ...prev.targets,
+        ...extraTargets,
+        energy: { ...normalizeProfile(prev.targets.energy), lastReview: getTodayKey() },
+      },
+    }));
+
+  const handleApplyEnergySuggestion = () => {
+    if (!energySuggestion) return;
+    markEnergyReviewed(energySuggestion);
+    showToast(`Neues Kalorienziel: ${formatNumberDE(energySuggestion.calories)} kcal`, null, 'emerald');
   };
 
   const handleExportJSON = () => {
@@ -3810,6 +3911,58 @@ export default function App() {
                 </div>
               </div>
               </div>
+
+              {/* Adaptives Kalorienziel: Verbrauch, Trend, Wochen-Vorschlag */}
+              {energyProfile.enabled && !energyEstimate && (
+                <div className="rounded-2xl border border-zinc-800 bg-zinc-900 px-3.5 py-3 text-xs text-zinc-400">
+                  Trage dein Gewicht ein, damit das automatische Kalorienziel rechnen kann.
+                </div>
+              )}
+              {energyEstimate && (
+                <div className="rounded-2xl border border-zinc-800 bg-zinc-900 px-3.5 py-3 space-y-2.5">
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-zinc-400 tabular-nums">
+                    <span>
+                      Verbrauch ≈{' '}
+                      <strong className="text-zinc-100">{formatNumberDE(energyEstimate.tdee)} kcal</strong>
+                    </span>
+                    <span>
+                      {energyEstimate.observedTdee === null
+                        ? 'per Formel geschätzt'
+                        : `gelernt aus ${energyEstimate.validDays} Tagen (${Math.round(energyEstimate.confidence * 100)} %)`}
+                    </span>
+                    {energyEstimate.trendPerWeek !== null && (
+                      <span>
+                        Trend{' '}
+                        <strong className="text-zinc-200">
+                          {formatKgDelta(energyEstimate.trendPerWeek)} kg/Woche
+                        </strong>
+                      </span>
+                    )}
+                  </div>
+                  {energySuggestion && (
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pt-2.5 border-t border-zinc-800">
+                      <div className="text-xs text-zinc-300 leading-relaxed">
+                        Wochen-Check: neues Ziel{' '}
+                        <strong className="text-emerald-400">
+                          {formatNumberDE(energySuggestion.calories)} kcal
+                        </strong>{' '}
+                        <span className="text-zinc-500">
+                          (bisher {formatNumberDE(appData.targets.calories)}) · {energySuggestion.protein} g P ·{' '}
+                          {energySuggestion.carbs} g KH · {energySuggestion.fat} g F
+                        </span>
+                      </div>
+                      <div className="flex gap-2 shrink-0">
+                        <Button variant="secondary" size="sm" onClick={() => markEnergyReviewed()}>
+                          Später
+                        </Button>
+                        <Button variant="primary" size="sm" onClick={handleApplyEnergySuggestion}>
+                          Übernehmen
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Kompakte 1-Klick Schnell-Waage für den ausgewählten Tag */}
               <form
@@ -5867,6 +6020,151 @@ export default function App() {
 
           {settingsTab === 'targets' && (
             <form onSubmit={handleSaveTargets} className="space-y-4">
+              <div className="p-3.5 rounded-2xl bg-zinc-950/90 border border-zinc-800 space-y-3">
+                <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={energyForm.enabled}
+                    onChange={(e) => setEnergyForm({ ...energyForm, enabled: e.target.checked })}
+                    className="mt-0.5 w-4 h-4 accent-emerald-500"
+                  />
+                  <span>
+                    <span className="block text-xs font-bold text-zinc-100">Automatisches Kalorienziel</span>
+                    <span className="block text-[11px] text-zinc-500 leading-relaxed">
+                      Startwert aus deinen Körperdaten. Danach lernt die App aus Essen und Gewichtsverlauf
+                      und schlägt wöchentlich ein angepasstes Ziel vor.
+                    </span>
+                  </span>
+                </label>
+
+                {energyForm.enabled && (
+                  <>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label htmlFor="en-sex" className="block text-xs font-medium text-zinc-300 mb-1">Geschlecht</label>
+                        <select
+                          id="en-sex"
+                          value={energyForm.sex}
+                          onChange={(e) => setEnergyForm({ ...energyForm, sex: e.target.value })}
+                          className={ENERGY_FIELD_CLS}
+                        >
+                          <option value="m">Mann</option>
+                          <option value="f">Frau</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label htmlFor="en-height" className="block text-xs font-medium text-zinc-300 mb-1">Größe (cm)</label>
+                        <input
+                          id="en-height"
+                          type="number"
+                          inputMode="numeric"
+                          value={energyForm.heightCm}
+                          onChange={(e) => setEnergyForm({ ...energyForm, heightCm: e.target.value })}
+                          className={ENERGY_FIELD_CLS}
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="en-birth" className="block text-xs font-medium text-zinc-300 mb-1">Geburtsjahr</label>
+                        <input
+                          id="en-birth"
+                          type="number"
+                          inputMode="numeric"
+                          value={energyForm.birthYear}
+                          onChange={(e) => setEnergyForm({ ...energyForm, birthYear: e.target.value })}
+                          className={ENERGY_FIELD_CLS}
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="en-protein" className="block text-xs font-medium text-zinc-300 mb-1">Protein (g pro kg)</label>
+                        <input
+                          id="en-protein"
+                          type="number"
+                          step="0.1"
+                          inputMode="decimal"
+                          value={energyForm.proteinPerKg}
+                          onChange={(e) => setEnergyForm({ ...energyForm, proteinPerKg: e.target.value })}
+                          className={ENERGY_FIELD_CLS}
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label htmlFor="en-activity" className="block text-xs font-medium text-zinc-300 mb-1">
+                        Aktivität (nur Startwert, danach lernt die App selbst)
+                      </label>
+                      <select
+                        id="en-activity"
+                        value={energyForm.activity}
+                        onChange={(e) => setEnergyForm({ ...energyForm, activity: Number(e.target.value) })}
+                        className={ENERGY_FIELD_CLS}
+                      >
+                        {ACTIVITY_LEVELS.map((a) => (
+                          <option key={a.value} value={a.value}>{a.label}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label htmlFor="en-goal" className="block text-xs font-medium text-zinc-300 mb-1">Ziel</label>
+                        <select
+                          id="en-goal"
+                          value={energyForm.goal}
+                          onChange={(e) => setEnergyForm({ ...energyForm, goal: e.target.value })}
+                          className={ENERGY_FIELD_CLS}
+                        >
+                          <option value="lose">Abnehmen</option>
+                          <option value="maintain">Gewicht halten</option>
+                          <option value="gain">Zunehmen</option>
+                        </select>
+                      </div>
+                      {energyForm.goal !== 'maintain' && (
+                        <div>
+                          <label htmlFor="en-rate" className="block text-xs font-medium text-zinc-300 mb-1">Tempo pro Woche</label>
+                          <select
+                            id="en-rate"
+                            value={energyForm.ratePct}
+                            onChange={(e) => setEnergyForm({ ...energyForm, ratePct: Number(e.target.value) })}
+                            className={ENERGY_FIELD_CLS}
+                          >
+                            {RATE_OPTIONS.map((r) => (
+                              <option key={r.value} value={r.value}>
+                                {r.label} ({r.value.toLocaleString('de-DE')} % Körpergewicht)
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                    </div>
+
+                    {energyPreview ? (
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-3 rounded-xl bg-zinc-900 border border-zinc-800">
+                        <div className="text-[11px] text-zinc-400 leading-relaxed tabular-nums">
+                          Grundumsatz {formatNumberDE(energyPreview.bmr)} kcal · Verbrauch ≈{' '}
+                          {formatNumberDE(energyPreview.tdee)} kcal
+                          {energyPreview.observedTdee !== null ? ' (gelernt)' : ' (Formel)'}
+                          <br />
+                          Vorschlag:{' '}
+                          <strong className="text-emerald-400">{formatNumberDE(energyPreview.calories)} kcal</strong>{' '}
+                          · {energyPreview.protein} g P · {energyPreview.carbs} g KH · {energyPreview.fat} g F
+                        </div>
+                        <Button variant="secondary" size="sm" onClick={handleApplyEnergyPreview} className="shrink-0">
+                          Werte übernehmen
+                        </Button>
+                      </div>
+                    ) : (
+                      <p className="text-[11px] text-amber-300">
+                        Trage zuerst dein aktuelles Gewicht ein (Tagesansicht), dann kann die App rechnen.
+                      </p>
+                    )}
+                    <p className="text-[11px] text-zinc-500 leading-relaxed">
+                      Schätzung für den Alltag, keine ärztliche Beratung. Das Ziel sinkt nie unter deinen Grundumsatz,
+                      das Defizit ist auf 25 % begrenzt.
+                    </p>
+                  </>
+                )}
+              </div>
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-medium text-zinc-300 mb-1">

@@ -11,6 +11,17 @@ Persönlicher Kalorien-, Makro-, Habit- und Gewichtstracker als installierbare W
 - **In Drive:** Ordner `Health Habit Tracker` mit `health-habit-tracker-sync.json` und Tages-Backups der letzten 14 Tage (`backup-JJJJ-MM-TT.json`). Die App hat nur Zugriff auf Dateien, die sie selbst angelegt hat (Zugriffsrecht `drive.file`).
 - **Zurücksetzen / Import:** Danach pausiert der Sync, und du entscheidest im Banner: „Hochladen" (dieser Stand gilt überall) oder „Drive-Stand laden".
 
+## Automatisches Kalorienziel
+
+Unter **Ziele → Tagesziele → Automatisches Kalorienziel** (Größe, Geburtsjahr, Geschlecht, Aktivität, Ziel und Tempo):
+
+- **Start:** Grundumsatz nach Mifflin-St Jeor × Aktivitätsfaktor = geschätzter Verbrauch.
+- **Lernen:** Aus den letzten 28 Tagen (Ø gegessene Kalorien und geglätteter Gewichtstrend) wird der tatsächliche Verbrauch berechnet: Ø Aufnahme − Trendänderung × 7.700 kcal / Tage. Tage mit auffällig wenig Kalorien gelten als unvollständig geloggt und zählen nicht. Ab 7 verwertbaren Tagen und 4 Wiegungen fließt der Messwert ein, ab 21 Tagen und 8 Wiegungen voll.
+- **Ziel:** Verbrauch − Defizit (Tempo in % Körpergewicht pro Woche), nie unter Grundumsatz bzw. 1.500/1.200 kcal, Defizit max. 25 %. Protein = g pro kg × Gewicht, Fett ≥ 0,8 g/kg bzw. 25 % der Kalorien, Rest Kohlenhydrate.
+- **Wochen-Check:** Einmal pro Woche schlägt die App in der Tagesbilanz ein neues Ziel vor (Schritt max. ±150 kcal); übernommen wird nur auf Tippen.
+
+Code: `src/energy/adaptive.ts` (mit Tests).
+
 ## Lebensmitteldaten
 
 | Quelle | Inhalt | Verfügbarkeit |
