@@ -32,6 +32,12 @@ export interface AppData {
   logsByDate: Record<string, ListItem[]>;
   habitChecksByDate: Record<string, Record<Id, boolean>>;
   weightsByDate: Record<string, number>;
+  /** Trainings-Übungen (Bibliothek) */
+  exercises?: ListItem[];
+  /** Gespeicherte Workouts (Vorlagen aus mehreren Übungen) */
+  workoutTemplates?: ListItem[];
+  /** Absolvierte Trainingseinheiten pro Tag */
+  workoutsByDate?: Record<string, ListItem[]>;
 }
 
 /** t = Zeitpunkt der letzten Änderung (ms), d = gelöscht */
@@ -53,6 +59,8 @@ const LIST_KINDS = [
   ['fav', 'favorites'],
   ['smeal', 'savedMeals'],
   ['habit', 'habits'],
+  ['ex', 'exercises'],
+  ['wtpl', 'workoutTemplates'],
 ] as const;
 
 /** Tombstones älter als das werden beim Merge verworfen. */
@@ -67,7 +75,8 @@ export function flatten(data: AppData): FlatRecords {
   out.targets = data.targets;
 
   for (const [prefix, field] of LIST_KINDS) {
-    const list = Array.isArray(data[field]) ? data[field] : [];
+    const raw = data[field];
+    const list = Array.isArray(raw) ? raw : [];
     const order: Id[] = [];
     for (const item of list) {
       if (!item || typeof item.id !== 'string') continue;
@@ -90,6 +99,19 @@ export function flatten(data: AppData): FlatRecords {
       order.push(entry.id);
     }
     if (order.length > 0) out[`ord${SEP}log${SEP}${date}`] = order;
+  }
+
+  for (const [date, sessions] of Object.entries(data.workoutsByDate || {})) {
+    if (!Array.isArray(sessions) || sessions.length === 0) continue;
+    const order: Id[] = [];
+    for (const session of sessions) {
+      if (!session || typeof session.id !== 'string') continue;
+      const key = `wo${SEP}${date}${SEP}${session.id}`;
+      if (key in out) continue;
+      out[key] = session;
+      order.push(session.id);
+    }
+    if (order.length > 0) out[`ord${SEP}wo${SEP}${date}`] = order;
   }
 
   for (const [date, checks] of Object.entries(data.habitChecksByDate || {})) {
@@ -132,8 +154,11 @@ export function unflatten(records: FlatRecords, defaultTargets: Targets): AppDat
     favorites: new Map(),
     savedMeals: new Map(),
     habits: new Map(),
+    exercises: new Map(),
+    workoutTemplates: new Map(),
   };
   const logs: Record<string, Map<Id, ListItem>> = {};
+  const workouts: Record<string, Map<Id, ListItem>> = {};
   const habitChecksByDate: AppData['habitChecksByDate'] = {};
   const weightsByDate: AppData['weightsByDate'] = {};
   let targets: Targets = { ...defaultTargets };
@@ -148,6 +173,9 @@ export function unflatten(records: FlatRecords, defaultTargets: Targets): AppDat
     } else if (kind === 'log' && parts.length >= 3) {
       const date = parts[1];
       (logs[date] ||= new Map()).set(parts.slice(2).join(SEP), value as ListItem);
+    } else if (kind === 'wo' && parts.length >= 3) {
+      const date = parts[1];
+      (workouts[date] ||= new Map()).set(parts.slice(2).join(SEP), value as ListItem);
     } else if (kind === 'chk' && parts.length >= 3) {
       const date = parts[1];
       (habitChecksByDate[date] ||= {})[parts.slice(2).join(SEP)] = true;
@@ -164,6 +192,11 @@ export function unflatten(records: FlatRecords, defaultTargets: Targets): AppDat
     logsByDate[date] = orderedList(items, records[`ord${SEP}log${SEP}${date}`]);
   }
 
+  const workoutsByDate: Record<string, ListItem[]> = {};
+  for (const [date, items] of Object.entries(workouts)) {
+    workoutsByDate[date] = orderedList(items, records[`ord${SEP}wo${SEP}${date}`]);
+  }
+
   return {
     targets,
     favorites: orderedList(lists.favorites, records[`ord${SEP}favorites`]),
@@ -172,6 +205,9 @@ export function unflatten(records: FlatRecords, defaultTargets: Targets): AppDat
     logsByDate,
     habitChecksByDate,
     weightsByDate,
+    exercises: orderedList(lists.exercises, records[`ord${SEP}exercises`]),
+    workoutTemplates: orderedList(lists.workoutTemplates, records[`ord${SEP}workoutTemplates`]),
+    workoutsByDate,
   };
 }
 

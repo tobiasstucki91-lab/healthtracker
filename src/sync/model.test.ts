@@ -28,6 +28,17 @@ function base(): AppData {
     },
     habitChecksByDate: { '2026-11-17': { 'hab-1': true } },
     weightsByDate: { '2026-11-17': 81.4 },
+    exercises: [{ id: 'ex-bench', name: 'Bankdrücken' }, { id: 'ex-squat', name: 'Kniebeuge' }],
+    workoutTemplates: [{ id: 'wtpl-1', name: 'Push', exerciseIds: ['ex-bench'] }],
+    workoutsByDate: {
+      '2026-11-17': [
+        {
+          id: 'wo-1',
+          name: 'Push',
+          exercises: [{ uid: 'u1', exerciseId: 'ex-bench', sets: [{ kg: 80, reps: 8, done: true }] }],
+        },
+      ],
+    },
   };
 }
 

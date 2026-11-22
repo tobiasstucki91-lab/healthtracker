@@ -56,9 +56,13 @@ import {
   House,
   SquareCheckBig,
   ScanBarcode,
+  Dumbbell,
 } from 'lucide-react';
 import { useSyncedAppData } from './sync/useSyncedAppData';
 import { SyncBanner, SyncHeaderButton, SyncSettingsPanel } from './components/SyncUi';
+import { ZoneHeader } from './components/ZoneHeader';
+import { TrainingView } from './components/TrainingView';
+import { DEFAULT_EXERCISES } from './training/model';
 
 // ============================================================================
 // KONSTANTEN & STANDARDWERTE
@@ -518,29 +522,6 @@ const ENERGY_FIELD_CLS =
 
 const formatKgDelta = (kg) =>
   `${kg > 0 ? '+' : ''}${kg.toLocaleString('de-DE', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}`;
-
-/**
- * Überschrift eines Bereichs (Tagesbilanz, Essen hinzufügen …): steht über der
- * Karte, mit Trennlinie und optionalen Infos/Aktionen rechts.
- */
-function ZoneHeader({ id, title, right = null }) {
-  return (
-    <div className="flex items-center gap-3 min-h-[32px]">
-      <h2
-        id={id}
-        className="text-xs font-bold uppercase tracking-[0.12em] text-zinc-200 whitespace-nowrap"
-      >
-        {title}
-      </h2>
-      <div className="flex-1 h-px bg-zinc-800" aria-hidden="true" />
-      {right && (
-        <div className="flex items-center gap-2 shrink-0 text-xs text-zinc-400 tabular-nums">
-          {right}
-        </div>
-      )}
-    </div>
-  );
-}
 
 /**
  * shadcn/ui Button Primitive
@@ -1902,6 +1883,9 @@ function defaultAppData() {
     logsByDate: {},
     habitChecksByDate: {},
     weightsByDate: {},
+    exercises: [...DEFAULT_EXERCISES],
+    workoutTemplates: [],
+    workoutsByDate: {},
   };
 }
 
@@ -1916,6 +1900,12 @@ function normalizeAppData(parsed) {
     logsByDate: isObj(parsed.logsByDate) ? parsed.logsByDate : {},
     habitChecksByDate: isObj(parsed.habitChecksByDate) ? parsed.habitChecksByDate : {},
     weightsByDate: isObj(parsed.weightsByDate) ? parsed.weightsByDate : {},
+    exercises:
+      Array.isArray(parsed.exercises) && parsed.exercises.length > 0
+        ? parsed.exercises
+        : [...DEFAULT_EXERCISES],
+    workoutTemplates: Array.isArray(parsed.workoutTemplates) ? parsed.workoutTemplates : [],
+    workoutsByDate: isObj(parsed.workoutsByDate) ? parsed.workoutsByDate : {},
   };
 }
 
@@ -3598,6 +3588,13 @@ export default function App() {
               onClick: () => setActiveView('daily'),
             },
             {
+              key: 'training',
+              label: 'Training',
+              icon: Dumbbell,
+              active: activeView === 'training',
+              onClick: () => setActiveView('training'),
+            },
+            {
               key: 'weight',
               label: 'Gewicht',
               icon: TrendingUp,
@@ -3764,7 +3761,7 @@ export default function App() {
               size="sm"
               onClick={() => setIsSettingsOpen(true)}
               aria-label="Ziele & Backup öffnen"
-              className="hidden sm:inline-flex lg:hidden"
+              className="inline-flex lg:hidden"
             >
               <Settings className="w-3.5 h-3.5 text-zinc-300" />
               <span className="hidden sm:inline">Ziele & Backup</span>
@@ -3790,6 +3787,12 @@ export default function App() {
                 value: 'daily',
                 label: 'Kalorien & Habits',
                 icon: Utensils,
+                activeIconClass: 'text-emerald-400',
+              },
+              {
+                value: 'training',
+                label: 'Training',
+                icon: Dumbbell,
                 activeIconClass: 'text-emerald-400',
               },
               {
@@ -5471,6 +5474,17 @@ export default function App() {
         {/* ================================================================== */}
         {/* ANSICHT B: GEWICHTSDATEN & VERLAUFSANALYSE                         */}
         {/* ================================================================== */}
+        {activeView === 'training' && (
+          <TrainingView
+            appData={appData}
+            setAppData={setAppData}
+            selectedDate={selectedDate}
+            dateLabel={dateHeader.badge}
+            onSelectDate={setSelectedDate}
+            notify={(message) => showToast(message, null, 'emerald')}
+          />
+        )}
+
         {activeView === 'weight' && (
           <section aria-label="Gewichtsdaten Analyse" className="space-y-5">
             {/* 4 KPI-Karten */}
@@ -6003,6 +6017,16 @@ export default function App() {
           },
           { key: 'scan' },
           {
+            key: 'training',
+            label: 'Training',
+            icon: Dumbbell,
+            active: activeView === 'training',
+            onClick: () => {
+              setActiveView('training');
+              window.scrollTo({ top: 0, behavior: 'smooth' });
+            },
+          },
+          {
             key: 'weight',
             label: 'Gewicht',
             icon: TrendingUp,
@@ -6011,13 +6035,6 @@ export default function App() {
               setActiveView('weight');
               window.scrollTo({ top: 0, behavior: 'smooth' });
             },
-          },
-          {
-            key: 'goals',
-            label: 'Ziele',
-            icon: Target,
-            active: false,
-            onClick: () => setIsSettingsOpen(true),
           },
         ].map((item) => {
           if (item.key === 'scan') {
