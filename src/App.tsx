@@ -1,6 +1,16 @@
 // @ts-nocheck -- UI-Code aus Version 1, noch nicht typisiert (Sync-Module unter src/sync sind typisiert)
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { loadBlsIndex, searchIndex as searchBlsIndex } from './foods/bls';
+import { searchDishes } from './foods/dishes';
+import {
+  compressImageForAi,
+  estimateMealWithAi,
+  GEMINI_FALLBACK_MODELS,
+  loadGeminiApiKey,
+  loadGeminiModel,
+  saveGeminiApiKey,
+  saveGeminiModel,
+} from './foods/aiEstimate';
 import {
   estimateEnergy,
   weeklySuggestion,
@@ -2006,6 +2016,16 @@ export default function App() {
   const [confirmReset, setConfirmReset] = useState(false);
   const [importFeedback, setImportFeedback] = useState(null);
 
+  // KI-Nährwertschätzung (Gemini API, lokal konfiguriert)
+  const [geminiApiKey, setGeminiApiKeyState] = useState(loadGeminiApiKey);
+  const [geminiModel, setGeminiModelState] = useState(loadGeminiModel);
+  const [showGeminiKey, setShowGeminiKey] = useState(false);
+  const [isEstimatingAi, setIsEstimatingAi] = useState(false);
+  const [aiError, setAiError] = useState(null);
+  const [aiTestStatus, setAiTestStatus] = useState(null);
+  const aiPhotoInputRef = useRef(null);
+  const aiAbortRef = useRef(null);
+
   // Barcode-Foto-Scanner Modal
   const [isScannerOpen, setIsScannerOpen] = useState(false);
   const autoSelectBarcodeRef = useRef(false);
@@ -2349,6 +2369,13 @@ export default function App() {
     showToast(`Barcode erkannt: ${code}`, null, 'emerald');
   };
 
+  // Offline-Gerichte-DB (0 ms, ~100 Restaurant- & internationale Gerichte inkl. Pad Thai)
+  const localDishResults = useMemo(() => {
+    const trimmed = searchQuery.trim();
+    if (trimmed.length < 2 || isBarcodeQuery) return [];
+    return searchDishes(trimmed, 12);
+  }, [searchQuery, isBarcodeQuery]);
+
   // 0-ms Suche in eigenen Favoriten & gespeicherten Mahlzeiten
   const localPersonalResults = useMemo(() => {
     const trimmed = searchQuery.trim();
@@ -2408,10 +2435,10 @@ export default function App() {
 
   // Gefilterte Suchergebnisse gemäß Quellen-Filter ('all' | 'local' | 'off')
   const filteredSearchResults = useMemo(() => {
-    if (sourceFilter === 'local') return [...localBasisResults, ...blsResults.slice(0, 20)];
+    if (sourceFilter === 'local') return [...localDishResults, ...localBasisResults, ...blsResults.slice(0, 20)];
     if (sourceFilter === 'off') return offResults;
-    return [...localBasisResults, ...blsResults.slice(0, 12), ...offResults];
-  }, [sourceFilter, localBasisResults, blsResults, offResults]);
+    return [...localDishResults, ...localBasisResults, ...blsResults.slice(0, 12), ...offResults];
+  }, [sourceFilter, localDishResults, localBasisResults, blsResults, offResults]);
 
   // Zuletzt geloggte Einträge (1-Tap-Wiederholung bei leerem Suchfeld)
   const recentLoggedMeals = useMemo(() => {
@@ -2900,10 +2927,97 @@ export default function App() {
 
   const handleSelectFoodForCalculator = (food) => {
     setSelectedFood(food);
-    setGramsInput('100');
+    const defaultGrams =
+      (food.source === 'dish' || food.source === 'ai') && food.servingQuantity > 0
+        ? String(food.servingQuantity)
+        : '100';
+    setGramsInput(defaultGrams);
     setUnitCountInput('1');
-    setAmountUnit(getPieceUnit(food)?.natural ? 'unit' : 'g');
+    setAmountUnit(food.source === 'dish' || food.source === 'ai' ? 'g' : getPieceUnit(food)?.natural ? 'unit' : 'g');
     setSaveFoodAsFav(false);
+  };
+
+  const handleUpdateGeminiKey = (value) => {
+    setGeminiApiKeyState(value);
+    saveGeminiApiKey(value);
+    setAiTestStatus(null);
+  };
+
+  const handleUpdateGeminiModel = (value) => {
+    setGeminiModelState(value);
+    saveGeminiModel(value);
+    setAiTestStatus(null);
+  };
+
+  const openAiSettings = () => {
+    setSettingsTab('ai');
+    setIsSettingsOpen(true);
+  };
+
+  const handleEstimateWithAi = async ({ query = searchQuery, file = null } = {}) => {
+    if (!geminiApiKey.trim()) {
+      openAiSettings();
+      showToast('Bitte kurz deinen kostenlosen Gemini API-Key eintragen', null, 'amber');
+      return;
+    }
+    if (!file && query.trim().length < 2) {
+      showToast('Bitte gib ein Gericht ein (z. B. Pad Thai mit Hähnchen)', null, 'amber');
+      return;
+    }
+
+    aiAbortRef.current?.abort();
+    const ctrl = new AbortController();
+    aiAbortRef.current = ctrl;
+    setIsEstimatingAi(true);
+    setAiError(null);
+
+    try {
+      let imagePayload = {};
+      if (file) {
+        const compressed = await compressImageForAi(file);
+        imagePayload = { imageBase64: compressed.base64, mimeType: compressed.mimeType };
+      }
+      const food = await estimateMealWithAi({
+        query: query.trim(),
+        apiKey: geminiApiKey,
+        model: geminiModel,
+        signal: ctrl.signal,
+        ...imagePayload,
+      });
+      handleSelectFoodForCalculator(food);
+      showToast(`KI-Schätzung bereit: ${food.name}`, null, 'emerald');
+    } catch (err) {
+      if (err?.name === 'AbortError') return;
+      const msg = err instanceof Error ? err.message : 'KI-Schätzung fehlgeschlagen.';
+      setAiError(msg);
+      showToast(msg, null, 'amber');
+    } finally {
+      if (aiAbortRef.current === ctrl) {
+        setIsEstimatingAi(false);
+      }
+    }
+  };
+
+  const handleTestGeminiKey = async () => {
+    if (!geminiApiKey.trim()) return;
+    setAiTestStatus({ kind: 'loading', text: 'Teste Verbindung zu Gemini…' });
+    try {
+      const food = await estimateMealWithAi({
+        query: '1 Apfel mittelgroß',
+        apiKey: geminiApiKey,
+        model: geminiModel,
+        bypassCache: true,
+      });
+      setAiTestStatus({
+        kind: 'ok',
+        text: `Verbindung erfolgreich! Test: ${food.name} (${food.calories} kcal/100g)`,
+      });
+    } catch (err) {
+      setAiTestStatus({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Verbindungstest fehlgeschlagen.',
+      });
+    }
   };
 
   const handleLogCalculatedFood = () => {
@@ -4267,13 +4381,30 @@ export default function App() {
                         </Button>
                       </div>
 
-                      {/* Quellen-Filter & Baukasten-Trigger */}
+                      {/* Versteckter Foto-Picker für KI Teller-Foto (funktioniert mit & ohne Text-Hinweis) */}
+                      <input
+                        ref={aiPhotoInputRef}
+                        type="file"
+                        accept="image/*"
+                        capture="environment"
+                        onChange={(e) => {
+                          const f = e.target.files?.[0];
+                          if (f) handleEstimateWithAi({ query: searchQuery, file: f });
+                          e.target.value = '';
+                        }}
+                        className="hidden"
+                      />
+
+                      {/* Quellen-Filter, KI-Foto & Baukasten-Trigger */}
                       <div className="flex items-center justify-between gap-2 flex-wrap">
                         {searchQuery.trim() && !isBarcodeQuery ? (
                           <div className="inline-flex items-center gap-1 bg-zinc-950/90 p-0.5 rounded-xl border border-zinc-800/90">
                             {[
                               { id: 'all', label: 'Alle' },
-                              { id: 'local', label: `Basis/BLS (${localBasisResults.length + blsResults.length})` },
+                              {
+                                id: 'local',
+                                label: `Lokal (${localDishResults.length + localBasisResults.length + blsResults.length})`,
+                              },
                               { id: 'off', label: `Marken (${offResults.length})`, loading: isSearchingOff },
                             ].map((pill) => (
                               <button
@@ -4294,7 +4425,24 @@ export default function App() {
                             ))}
                           </div>
                         ) : (
-                          <span />
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              disabled={isEstimatingAi}
+                              onClick={() => {
+                                if (!geminiApiKey.trim()) openAiSettings();
+                                else aiPhotoInputRef.current?.click();
+                              }}
+                              className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg text-[11px] font-semibold border bg-sky-500/10 text-sky-300 border-sky-500/30 hover:bg-sky-500/20 disabled:opacity-50 transition"
+                            >
+                              {isEstimatingAi ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Sparkles className="w-3.5 h-3.5" />
+                              )}
+                              <span>{geminiApiKey.trim() ? 'KI Teller-Foto' : 'KI einrichten'}</span>
+                            </button>
+                          </div>
                         )}
 
                         <button
@@ -4307,7 +4455,7 @@ export default function App() {
                           }`}
                         >
                           <Layers className="w-3.5 h-3.5 text-emerald-400" />
-                          <span>Mahlzeiten Baukasten</span>
+                          <span>Baukasten</span>
                           {mealBuilderItems.length > 0 && (
                             <span className="px-1.5 py-0.2 rounded-full bg-emerald-500 text-zinc-950 text-[10px] font-bold tabular-nums">
                               {mealBuilderItems.length}
@@ -4315,6 +4463,62 @@ export default function App() {
                           )}
                         </button>
                       </div>
+
+                      {/* 1-Tap KI-Schätzung für beliebige Gerichte & Kombinationen */}
+                      {searchQuery.trim().length >= 2 && !isBarcodeQuery && (
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            disabled={isEstimatingAi}
+                            onClick={() => handleEstimateWithAi({ query: searchQuery })}
+                            className="flex-1 flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl bg-sky-500/10 hover:bg-sky-500/15 border border-sky-500/30 text-left transition disabled:opacity-60"
+                          >
+                            <span className="flex items-center gap-2 min-w-0">
+                              {isEstimatingAi ? (
+                                <Loader2 className="w-4 h-4 text-sky-400 animate-spin shrink-0" />
+                              ) : (
+                                <Sparkles className="w-4 h-4 text-sky-400 shrink-0" />
+                              )}
+                              <span className="text-xs font-semibold text-sky-200 truncate">
+                                {isEstimatingAi
+                                  ? `Schätze „${searchQuery.trim()}“ mit Gemini…`
+                                  : `„${searchQuery.trim()}“ mit KI schätzen`}
+                              </span>
+                            </span>
+                            <span className="text-[10px] font-semibold text-sky-300/80 shrink-0">
+                              {geminiApiKey.trim() ? 'Gemini' : 'Einrichten'}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isEstimatingAi}
+                            onClick={() => {
+                              if (!geminiApiKey.trim()) openAiSettings();
+                              else aiPhotoInputRef.current?.click();
+                            }}
+                            title="Teller-Foto mit Text-Hinweis schätzen"
+                            aria-label="Teller-Foto mit KI schätzen"
+                            className="h-10 w-10 rounded-xl bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/30 text-sky-300 flex items-center justify-center shrink-0 transition disabled:opacity-60"
+                          >
+                            <Camera className="w-4 h-4" />
+                          </button>
+                        </div>
+                      )}
+
+                      {aiError && (
+                        <div className="flex items-start gap-2 p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-[11px] text-rose-200">
+                          <AlertCircle className="w-3.5 h-3.5 text-rose-400 shrink-0 mt-0.5" />
+                          <span className="flex-1">{aiError}</span>
+                          <button
+                            type="button"
+                            onClick={() => setAiError(null)}
+                            aria-label="Fehler ausblenden"
+                            className="text-rose-300 hover:text-rose-100"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      )}
 
                       {/* Interaktiver Grammatur-Rechner */}
                       {selectedFood && calculatedFoodMacros && (
@@ -4333,7 +4537,7 @@ export default function App() {
                                 </span>
                                 <Badge
                                   variant={
-                                    selectedFood.source === 'basis'
+                                    selectedFood.source === 'basis' || selectedFood.source === 'dish'
                                       ? 'emerald'
                                       : selectedFood.source === 'bls'
                                       ? 'amber'
@@ -4343,6 +4547,10 @@ export default function App() {
                                   {selectedFood.brand ||
                                     (selectedFood.source === 'basis'
                                       ? 'Basis-DB'
+                                      : selectedFood.source === 'dish'
+                                      ? 'Gericht'
+                                      : selectedFood.source === 'ai'
+                                      ? 'KI-Schätzung'
                                       : 'Open Food Facts')}
                                 </Badge>
                                 {selectedFood.nutriScore && (
@@ -4368,6 +4576,12 @@ export default function App() {
                                 ·{' '}
                                 <span className="text-sky-400">{selectedFood.fat}g F</span>
                               </div>
+                              {selectedFood.aiNote && (
+                                <div className="flex items-start gap-1.5 text-[11px] text-sky-300/90 mt-1.5">
+                                  <Sparkles className="w-3 h-3 shrink-0 mt-0.5 text-sky-400" />
+                                  <span>{selectedFood.aiNote}</span>
+                                </div>
+                              )}
                             </div>
 
                             <button
@@ -4710,7 +4924,7 @@ export default function App() {
                                       </span>
                                       <Badge
                                         variant={
-                                          food.source === 'basis'
+                                          food.source === 'basis' || food.source === 'dish'
                                             ? 'emerald'
                                             : food.source === 'bls'
                                             ? 'amber'
@@ -4718,7 +4932,11 @@ export default function App() {
                                         }
                                       >
                                         {food.brand ||
-                                          (food.source === 'basis' ? 'Basis-DB' : 'OFF')}
+                                          (food.source === 'basis'
+                                            ? 'Basis-DB'
+                                            : food.source === 'dish'
+                                            ? 'Gericht'
+                                            : 'OFF')}
                                       </Badge>
                                     </div>
                                     <div className="text-[11px] text-zinc-400 tabular-nums mt-0.5">
@@ -6498,11 +6716,12 @@ export default function App() {
             value={settingsTab}
             onValueChange={setSettingsTab}
             variant="band"
-            className="w-full grid-cols-3 sm:grid sm:grid-cols-3 p-1 rounded-xl bg-zinc-950/90 border border-zinc-800"
+            className="w-full p-1 rounded-xl bg-zinc-950/90 border border-zinc-800"
             items={[
               { value: 'targets', label: 'Tagesziele', icon: Target },
-              { value: 'gdrive', label: 'Google Drive', icon: Cloud },
-              { value: 'backup', label: 'JSON-Backup', icon: Download },
+              { value: 'gdrive', label: 'Drive', icon: Cloud },
+              { value: 'ai', label: 'KI-Suche', icon: Sparkles, activeIconClass: 'text-sky-400' },
+              { value: 'backup', label: 'Backup', icon: Download },
             ]}
           />
 
@@ -6762,6 +6981,122 @@ export default function App() {
           )}
 
           {settingsTab === 'gdrive' && <SyncSettingsPanel sync={sync} />}
+
+          {settingsTab === 'ai' && (
+            <div className="space-y-4">
+              <div className="p-3.5 rounded-2xl bg-zinc-950/90 border border-zinc-800 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-xs font-bold text-zinc-100">
+                    <Sparkles className="w-4 h-4 text-sky-400" />
+                    <span>KI-Nährwertschätzung (Google Gemini)</span>
+                  </div>
+                  <Badge variant={geminiApiKey.trim() ? 'emerald' : 'secondary'}>
+                    {geminiApiKey.trim() ? 'Aktiv' : 'Nicht eingerichtet'}
+                  </Badge>
+                </div>
+                <p className="text-xs text-zinc-400 leading-relaxed">
+                  Schätzt Kalorien, Makros und Portionsgröße für beliebige Gerichte (z. B. <em>„Pad Thai mit Hähnchen, 1 Teller“</em>) oder direkt per <strong>Teller-Foto</strong> – ohne eigenen Server direkt über deinen persönlichen Gemini Free-Tier-Key.
+                </p>
+              </div>
+
+              <div className="space-y-1.5">
+                <label htmlFor="gemini-api-key" className="block text-xs font-medium text-zinc-300">
+                  Gemini API-Key (lokal auf diesem Gerät gespeichert)
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    id="gemini-api-key"
+                    type={showGeminiKey ? 'text' : 'password'}
+                    autoComplete="off"
+                    value={geminiApiKey}
+                    onChange={(e) => handleUpdateGeminiKey(e.target.value)}
+                    placeholder="AIzaSy..."
+                    className="flex-1 px-3 py-2 text-xs font-mono bg-zinc-950 border border-zinc-800 rounded-xl text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-sky-500"
+                  />
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setShowGeminiKey((v) => !v)}
+                    className="shrink-0"
+                  >
+                    {showGeminiKey ? 'Verbergen' : 'Zeigen'}
+                  </Button>
+                </div>
+                <p className="text-[11px] text-zinc-500 leading-relaxed">
+                  Kostenlosen Key erstellen unter{' '}
+                  <a
+                    href="https://aistudio.google.com/apikey"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-sky-400 hover:underline font-semibold"
+                  >
+                    aistudio.google.com/apikey
+                  </a>{' '}
+                  → „Create API key“ → hier einfügen.
+                </p>
+              </div>
+
+              <div className="space-y-1.5">
+                <label htmlFor="gemini-model" className="block text-xs font-medium text-zinc-300">
+                  Modell (optional)
+                </label>
+                <select
+                  id="gemini-model"
+                  value={geminiModel}
+                  onChange={(e) => handleUpdateGeminiModel(e.target.value)}
+                  className="w-full px-3 py-2 text-xs bg-zinc-950 border border-zinc-800 rounded-xl text-zinc-100 focus:outline-none focus:border-sky-500"
+                >
+                  <option value="">Automatisch (empfohlen: {GEMINI_FALLBACK_MODELS[0]})</option>
+                  {GEMINI_FALLBACK_MODELS.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {aiTestStatus && (
+                <div
+                  className={`p-3 rounded-xl text-xs border ${
+                    aiTestStatus.kind === 'ok'
+                      ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                      : aiTestStatus.kind === 'error'
+                      ? 'bg-rose-500/15 text-rose-300 border-rose-500/30'
+                      : 'bg-zinc-950 text-zinc-300 border-zinc-800'
+                  }`}
+                >
+                  {aiTestStatus.text}
+                </div>
+              )}
+
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="primary"
+                  size="md"
+                  disabled={!geminiApiKey.trim() || aiTestStatus?.kind === 'loading'}
+                  onClick={handleTestGeminiKey}
+                  className="flex-1"
+                >
+                  {aiTestStatus?.kind === 'loading' ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Sparkles className="w-4 h-4" />
+                  )}
+                  <span>Verbindung testen</span>
+                </Button>
+                {geminiApiKey.trim() && (
+                  <Button
+                    variant="ghost"
+                    size="md"
+                    onClick={() => handleUpdateGeminiKey('')}
+                    className="hover:text-rose-300"
+                  >
+                    Entfernen
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
 
           {settingsTab === 'backup' && (
             <div className="space-y-4">
