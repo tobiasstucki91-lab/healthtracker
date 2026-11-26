@@ -12,9 +12,10 @@ const AI_CACHE_KEY = 'hht_ai_food_cache_v1';
 const AI_CACHE_MAX = 60;
 
 export const GEMINI_FALLBACK_MODELS = [
-  'gemini-2.5-flash',
   'gemini-2.5-flash-lite',
+  'gemini-2.5-flash',
   'gemini-flash-latest',
+  'gemini-flash-lite-latest',
 ] as const;
 
 export interface AiEstimatedFood {
@@ -29,6 +30,7 @@ export interface AiEstimatedFood {
   servingQuantity: number;
   servingSize: string;
   aiNote: string;
+  usedModel?: string;
   source: 'ai';
 }
 
@@ -253,10 +255,150 @@ export async function compressImageForAi(
   }
 }
 
+export interface RawModelInfo {
+  name?: string;
+  supportedGenerationMethods?: string[];
+}
+
+/**
+ * Filtert und sortiert die vom API-Key unterstützten Gemini-Flash-Modelle
+ * für schnelle, günstige Makro- & Foto-Schätzungen (neueste stabile zuerst,
+ * Flash-Lite bevorzugt wegen höherer Verfügbarkeit im Free Tier).
+ */
+export function rankGeminiFlashModels(models: RawModelInfo[]): string[] {
+  const candidates: Array<{ id: string; score: number }> = [];
+  for (const m of models) {
+    if (!m?.name) continue;
+    const methods = Array.isArray(m.supportedGenerationMethods) ? m.supportedGenerationMethods : [];
+    if (methods.length > 0 && !methods.includes('generateContent')) continue;
+    const id = m.name.replace(/^models\//, '').trim();
+    if (!/^gemini-/i.test(id)) continue;
+    if (!/flash/i.test(id)) continue;
+    if (/(tts|audio|image|live|native|thinking|computer|robotics|embedding|vision|001$)/i.test(id)) continue;
+
+    const verMatch = id.match(/^gemini-(\d+)(?:\.(\d+))?/i);
+    const major = verMatch ? Number(verMatch[1]) : 0;
+    const minor = verMatch && verMatch[2] ? Number(verMatch[2]) : 0;
+    const versionScore = major * 100 + minor * 10;
+    const isLite = /lite/i.test(id);
+    const isPreview = /(preview|exp)/i.test(id);
+    const isLatestAlias = /latest/i.test(id);
+
+    let score = versionScore * 10;
+    if (isLite) score += 25;
+    if (!isPreview) score += 40;
+    if (isLatestAlias) score = 2200 + (isLite ? 25 : 0);
+
+    candidates.push({ id, score });
+  }
+
+  const seen = new Set<string>();
+  return candidates
+    .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id))
+    .map((c) => c.id)
+    .filter((id) => {
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+}
+
+let discoveredModelsCache: { key: string; models: string[]; t: number } | null = null;
+
+export async function discoverGeminiModels(apiKey: string, signal?: AbortSignal): Promise<string[]> {
+  const key = apiKey.trim();
+  if (!key) return [...GEMINI_FALLBACK_MODELS];
+  if (
+    discoveredModelsCache &&
+    discoveredModelsCache.key === key &&
+    Date.now() - discoveredModelsCache.t < 15 * 60 * 1000
+  ) {
+    return discoveredModelsCache.models;
+  }
+
+  const ctrl = new AbortController();
+  const onAbort = () => ctrl.abort();
+  signal?.addEventListener('abort', onAbort, { once: true });
+  const timer = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}&pageSize=100`,
+      { signal: ctrl.signal }
+    );
+    if (!res.ok) return [...GEMINI_FALLBACK_MODELS];
+    const json = await res.json();
+    const ranked = rankGeminiFlashModels(Array.isArray(json?.models) ? json.models : []);
+    if (ranked.length > 0) {
+      discoveredModelsCache = { key, models: ranked, t: Date.now() };
+      return ranked;
+    }
+  } catch {
+    // Fallback auf Standardliste
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
+  }
+  return [...GEMINI_FALLBACK_MODELS];
+}
+
+function waitMs(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(t);
+        reject(new DOMException('Aborted', 'AbortError'));
+      },
+      { once: true }
+    );
+  });
+}
+
+async function callGeminiOnce(opts: {
+  model: string;
+  key: string;
+  parts: Array<Record<string, unknown>>;
+  disableThinking: boolean;
+  signal?: AbortSignal;
+}): Promise<Response> {
+  const generationConfig: Record<string, unknown> = {
+    temperature: 0.2,
+    maxOutputTokens: 320,
+    responseMimeType: 'application/json',
+    responseSchema: RESPONSE_SCHEMA,
+  };
+  if (opts.disableThinking) {
+    generationConfig.thinkingConfig = { thinkingBudget: 0 };
+  }
+
+  const ctrl = new AbortController();
+  const onAbort = () => ctrl.abort();
+  opts.signal?.addEventListener('abort', onAbort, { once: true });
+  const timer = setTimeout(() => ctrl.abort(), 20000);
+  try {
+    return await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(opts.model)}:generateContent?key=${encodeURIComponent(opts.key)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: opts.parts }],
+          generationConfig,
+        }),
+        signal: ctrl.signal,
+      }
+    );
+  } finally {
+    clearTimeout(timer);
+    opts.signal?.removeEventListener('abort', onAbort);
+  }
+}
+
 export async function estimateMealWithAi(opts: EstimateMealOptions): Promise<AiEstimatedFood> {
   const key = opts.apiKey.trim();
   if (!key) {
-    throw new Error('Bitte zuerst deinen kostenlosen Gemini API-Key unter Einstellungen → KI-Schätzung eintragen.');
+    throw new Error('Bitte zuerst deinen kostenlosen Gemini API-Key unter Einstellungen → KI-Suche eintragen.');
   }
   const hasImage = Boolean(opts.imageBase64);
   const queryClean = opts.query.trim();
@@ -281,94 +423,106 @@ export async function estimateMealWithAi(opts: EstimateMealOptions): Promise<AiE
   }
 
   const preferred = opts.model?.trim();
-  const models = preferred
-    ? [preferred, ...GEMINI_FALLBACK_MODELS.filter((m) => m !== preferred)]
-    : [...GEMINI_FALLBACK_MODELS];
+  const discovered = preferred ? [] : await discoverGeminiModels(key, opts.signal);
+  const pool = [...discovered, ...GEMINI_FALLBACK_MODELS];
+  const models: string[] = [];
+  if (preferred) models.push(preferred);
+  for (const m of pool) {
+    if (!models.includes(m)) models.push(m);
+  }
+  const tryModels = models.slice(0, 5);
 
   let lastError: Error | null = null;
-  for (const model of models) {
-    const generationConfig: Record<string, unknown> = {
-      temperature: 0.2,
-      maxOutputTokens: 320,
-      responseMimeType: 'application/json',
-      responseSchema: RESPONSE_SCHEMA,
-    };
-    // Gemini 2.5 denkt standardmäßig sehr lange (15-25s) – für schnelle Makro-Schätzung deaktivieren
-    if (/^gemini-2\.5-/i.test(model)) {
-      generationConfig.thinkingConfig = { thinkingBudget: 0 };
+  let saw503 = false;
+
+  for (let pass = 0; pass < 2; pass++) {
+    if (pass > 0) {
+      if (!saw503) break;
+      await waitMs(1500, opts.signal);
     }
 
-    const body = JSON.stringify({
-      contents: [{ role: 'user', parts }],
-      generationConfig,
-    });
+    for (const model of tryModels) {
+      const wantsNoThink = /^gemini-(2\.5-|3\.|flash-latest)/i.test(model);
+      try {
+        let res = await callGeminiOnce({
+          model,
+          key,
+          parts,
+          disableThinking: wantsNoThink,
+          signal: opts.signal,
+        });
 
-    const ctrl = new AbortController();
-    const onAbort = () => ctrl.abort();
-    opts.signal?.addEventListener('abort', onAbort, { once: true });
-    const timer = setTimeout(() => ctrl.abort(), 30000);
-
-    try {
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body,
-          signal: ctrl.signal,
+        // Falls ein Modell thinkingConfig nicht unterstützt (400), einmal ohne wiederholen
+        if (res.status === 400 && wantsNoThink) {
+          const errClone = await res.clone().json().catch(() => null);
+          const errMsg = String(errClone?.error?.message || '');
+          if (/thinking/i.test(errMsg)) {
+            res = await callGeminiOnce({
+              model,
+              key,
+              parts,
+              disableThinking: false,
+              signal: opts.signal,
+            });
+          }
         }
-      );
 
-      if (res.status === 404 || res.status === 503) {
-        lastError = new Error(`Modell ${model} gerade nicht verfügbar (${res.status})`);
-        continue;
-      }
-      if (res.status === 400 || res.status === 401 || res.status === 403) {
-        let msg = '';
-        try {
-          msg = (await res.json())?.error?.message || '';
-        } catch {
-          // ignorieren
+        if (res.status === 404) {
+          lastError = new Error(`Modell ${model} nicht verfügbar`);
+          continue;
         }
-        throw new Error(
-          msg && /api key/i.test(msg)
-            ? 'Gemini API-Key ungültig. Bitte unter Einstellungen → KI-Suche prüfen.'
-            : `Gemini-Anfrage abgelehnt (${res.status})${msg ? `: ${msg}` : ''}`
-        );
-      }
-      if (res.status === 429) {
-        throw new Error('Gemini Free-Tier-Limit kurzzeitig erreicht. Bitte in ein paar Sekunden erneut versuchen.');
-      }
-      if (!res.ok) {
-        throw new Error(`Gemini-Fehler (${res.status})`);
-      }
+        if (res.status === 503) {
+          saw503 = true;
+          lastError = new Error('Google Gemini ist gerade kurzfristig überlastet (503). Bitte gleich nochmal tippen.');
+          continue;
+        }
+        if (res.status === 429) {
+          saw503 = true;
+          lastError = new Error('Gemini Free-Tier-Limit kurzzeitig erreicht (429). Bitte kurz warten.');
+          continue;
+        }
+        if (res.status === 400 || res.status === 401 || res.status === 403) {
+          let msg = '';
+          try {
+            msg = (await res.json())?.error?.message || '';
+          } catch {
+            // ignorieren
+          }
+          throw new Error(
+            msg && /api key/i.test(msg)
+              ? 'Gemini API-Key ungültig. Bitte unter Einstellungen → KI-Suche prüfen.'
+              : `Gemini-Anfrage abgelehnt (${res.status})${msg ? `: ${msg}` : ''}`
+          );
+        }
+        if (!res.ok) {
+          lastError = new Error(`Gemini-Fehler (${res.status})`);
+          continue;
+        }
 
-      const json = await res.json();
-      const text = json?.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (typeof text !== 'string' || !text.trim()) {
-        throw new Error('Gemini hat keine verwertbare Antwort geliefert.');
+        const json = await res.json();
+        const text = json?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (typeof text !== 'string' || !text.trim()) {
+          lastError = new Error('Gemini hat keine verwertbare Antwort geliefert.');
+          continue;
+        }
+        const parsedJson = JSON.parse(text.replace(/^```json\s*|\s*```$/g, '').trim()) as RawAiNutritionPayload;
+        const food = parseAiEstimatePayload(parsedJson, queryClean || 'Foto-Mahlzeit');
+        if (!food) {
+          lastError = new Error('Die KI-Antwort enthielt keine gültigen Nährwerte.');
+          continue;
+        }
+        food.usedModel = model;
+        if (cacheKey) putCachedAiEstimate(cacheKey, food);
+        return food;
+      } catch (err) {
+        if (opts.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+        if (err instanceof Error && err.name === 'AbortError') {
+          lastError = new Error('Zeitüberschreitung bei der KI-Schätzung. Bitte erneut versuchen.');
+          continue;
+        }
+        lastError = err instanceof Error ? err : new Error('KI-Schätzung fehlgeschlagen.');
+        if (/API-Key ungültig|abgelehnt/i.test(lastError.message)) throw lastError;
       }
-      const parsedJson = JSON.parse(text.replace(/^```json\s*|\s*```$/g, '').trim()) as RawAiNutritionPayload;
-      const food = parseAiEstimatePayload(parsedJson, queryClean || 'Foto-Mahlzeit');
-      if (!food) {
-        throw new Error('Die KI-Antwort enthielt keine gültigen Nährwerte.');
-      }
-      if (cacheKey) putCachedAiEstimate(cacheKey, food);
-      return food;
-    } catch (err) {
-      if (opts.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-      if (err instanceof Error && err.name === 'AbortError') {
-        lastError = new Error('Zeitüberschreitung bei der KI-Schätzung. Bitte erneut versuchen.');
-        continue;
-      }
-      lastError = err instanceof Error ? err : new Error('KI-Schätzung fehlgeschlagen.');
-      // Nur bei nicht verfügbarem Modell (404/503) das nächste Modell versuchen
-      if (!/nicht verfügbar/i.test(lastError.message)) break;
-    } finally {
-      clearTimeout(timer);
-      opts.signal?.removeEventListener('abort', onAbort);
     }
   }
 

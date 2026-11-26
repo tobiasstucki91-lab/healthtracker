@@ -3010,7 +3010,7 @@ export default function App() {
       });
       setAiTestStatus({
         kind: 'ok',
-        text: `Verbindung erfolgreich! Test: ${food.name} (${food.calories} kcal/100g)`,
+        text: `Verbindung erfolgreich${food.usedModel ? ` (${food.usedModel})` : ''}! Test: ${food.name} (${food.calories} kcal/100g)`,
       });
     } catch (err) {
       setAiTestStatus({
