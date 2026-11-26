@@ -9,6 +9,7 @@ import {
   GEMINI_FALLBACK_MODELS,
   loadGeminiApiKey,
   loadGeminiModel,
+  loadLastWorkingModel,
   saveGeminiApiKey,
   saveGeminiModel,
 } from './foods/aiEstimate';
@@ -2983,9 +2984,13 @@ export default function App() {
     try {
       let imagePayload = {};
       if (file) {
+        const needsDiscovery = !geminiModel.trim() && !loadLastWorkingModel();
+        if (!geminiModel.trim() && !needsDiscovery) {
+          discoverGeminiModels(geminiApiKey).catch(() => {});
+        }
         const [compressed] = await Promise.all([
           compressImageForAi(file),
-          !geminiModel.trim() ? discoverGeminiModels(geminiApiKey, ctrl.signal).catch(() => []) : Promise.resolve([]),
+          needsDiscovery ? discoverGeminiModels(geminiApiKey, ctrl.signal).catch(() => []) : Promise.resolve([]),
         ]);
         if (ctrl.signal.aborted) return;
         imagePayload = { imageBase64: compressed.base64, mimeType: compressed.mimeType };
@@ -2996,6 +3001,7 @@ export default function App() {
         apiKey: geminiApiKey,
         model: geminiModel,
         signal: ctrl.signal,
+        onProgress: (text) => setAiProgressText(text),
         ...imagePayload,
       });
       handleSelectFoodForCalculator(food);
@@ -3016,6 +3022,7 @@ export default function App() {
   const handleTestGeminiKey = async () => {
     if (!geminiApiKey.trim()) return;
     setAiTestStatus({ kind: 'loading', text: 'Teste Verbindung zu Gemini…' });
+    const t0 = Date.now();
     try {
       const food = await estimateMealWithAi({
         query: '1 Apfel mittelgroß',
@@ -3023,9 +3030,11 @@ export default function App() {
         model: geminiModel,
         bypassCache: true,
       });
+      const sec = ((Date.now() - t0) / 1000).toFixed(1).replace('.', ',');
+      const meta = [food.usedModel, `${sec} s`].filter(Boolean).join(', ');
       setAiTestStatus({
         kind: 'ok',
-        text: `Verbindung erfolgreich${food.usedModel ? ` (${food.usedModel})` : ''}! Test: ${food.name} (${food.calories} kcal/100g)`,
+        text: `Verbindung erfolgreich (${meta})! Test: ${food.name} (${food.calories} kcal/100g)`,
       });
     } catch (err) {
       setAiTestStatus({

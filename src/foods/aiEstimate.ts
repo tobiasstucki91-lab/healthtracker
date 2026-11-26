@@ -241,15 +241,16 @@ export interface EstimateMealOptions {
   mimeType?: string;
   signal?: AbortSignal;
   bypassCache?: boolean;
+  onProgress?: (text: string) => void;
 }
 
 /**
- * Verkleinert ein Foto im Browser auf max. 640 px (JPEG 0.72), damit
- * das Foto nur ~40–60 KB groß ist (1 Vision-Tile) und mobil blitzschnell lädt.
+ * Verkleinert ein Foto im Browser auf max. 512 px (JPEG 0.70), damit
+ * das Foto nur ~20–35 KB groß ist (1 Vision-Tile) und mobil blitzschnell lädt.
  */
 export async function compressImageForAi(
   file: File,
-  maxSide = 640
+  maxSide = 512
 ): Promise<{ base64: string; mimeType: string }> {
   const drawScaled = (source: CanvasImageSource, width: number, height: number) => {
     const scale = Math.min(1, maxSide / Math.max(width, height, 1));
@@ -261,7 +262,7 @@ export async function compressImageForAi(
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('Canvas nicht verfügbar');
     ctx.drawImage(source, 0, 0, w, h);
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.72);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
     return { base64: dataUrl.split(',')[1] || '', mimeType: 'image/jpeg' };
   };
 
@@ -385,7 +386,9 @@ export async function discoverGeminiModels(apiKey: string, signal?: AbortSignal)
 
 export function thinkingConfigForModel(model: string): Record<string, unknown> | undefined {
   if (/^gemini-3/i.test(model)) return { thinkingLevel: 'minimal' };
-  if (/^gemini-2\.5-/i.test(model)) return { thinkingBudget: 0 };
+  if (/^gemini-2\.5-/i.test(model) || /^gemini-flash(-lite)?-latest$/i.test(model)) {
+    return { thinkingBudget: 0 };
+  }
   return undefined;
 }
 
@@ -399,12 +402,14 @@ export function extractResponseText(json: unknown): string | null {
   return typeof anyText?.text === 'string' ? anyText.text : null;
 }
 
-const HEDGE_DELAY_MS = 3500;
+const HEDGE_DELAY_MS = 5000;
 
 class ModelCallError extends Error {
   fatal: boolean;
-  constructor(message: string, fatal = false) {
+  shortReason: string;
+  constructor(message: string, shortReason: string, fatal = false) {
     super(message);
+    this.shortReason = shortReason;
     this.fatal = fatal;
   }
 }
@@ -419,7 +424,7 @@ async function callGeminiOnce(opts: {
 }): Promise<Response> {
   const generationConfig: Record<string, unknown> = {
     temperature: 0.2,
-    maxOutputTokens: 1024,
+    maxOutputTokens: 512,
     responseMimeType: 'application/json',
     responseSchema: RESPONSE_SCHEMA,
   };
@@ -487,19 +492,19 @@ async function trySingleModel(opts: {
   } catch (err) {
     if (opts.signal.aborted) throw new DOMException('Aborted', 'AbortError');
     if (err instanceof Error && err.name === 'AbortError') {
-      throw new ModelCallError('Zeitüberschreitung bei der KI-Schätzung. Bitte erneut versuchen.');
+      throw new ModelCallError('Zeitüberschreitung bei der KI-Schätzung. Bitte erneut versuchen.', 'Timeout');
     }
-    throw new ModelCallError(err instanceof Error ? err.message : 'KI-Schätzung fehlgeschlagen.');
+    throw new ModelCallError(err instanceof Error ? err.message : 'KI-Schätzung fehlgeschlagen.', 'Netzwerk');
   }
 
   if (res.status === 404) {
-    throw new ModelCallError(`Modell ${opts.model} nicht verfügbar`);
+    throw new ModelCallError(`Modell ${opts.model} nicht verfügbar`, '404');
   }
   if (res.status === 503) {
-    throw new ModelCallError('Google Gemini ist gerade kurzfristig überlastet (503). Bitte gleich nochmal tippen.');
+    throw new ModelCallError('Google Gemini ist gerade kurzfristig überlastet (503). Bitte gleich nochmal tippen.', '503');
   }
   if (res.status === 429) {
-    throw new ModelCallError('Gemini Free-Tier-Limit kurzzeitig erreicht (429). Bitte kurz warten.');
+    throw new ModelCallError('Gemini Free-Tier-Limit kurzzeitig erreicht (429). Bitte kurz warten.', '429');
   }
   if (res.status === 400 || res.status === 401 || res.status === 403) {
     let msg = '';
@@ -513,24 +518,30 @@ async function trySingleModel(opts: {
         msg && /api key/i.test(msg)
           ? 'Gemini API-Key ungültig. Bitte unter Einstellungen → KI-Suche prüfen.'
           : `Gemini-Anfrage abgelehnt (${res.status})${msg ? `: ${msg}` : ''}`,
+        String(res.status),
         true
       );
     }
-    throw new ModelCallError(`Modell ${opts.model} hat die Anfrage abgelehnt (400)${msg ? `: ${msg}` : ''}`);
+    throw new ModelCallError(`Modell ${opts.model} hat die Anfrage abgelehnt (400)${msg ? `: ${msg}` : ''}`, '400');
   }
   if (!res.ok) {
-    throw new ModelCallError(`Gemini-Fehler (${res.status})`);
+    throw new ModelCallError(`Gemini-Fehler (${res.status})`, `HTTP ${res.status}`);
   }
 
   const json = await res.json();
   const text = extractResponseText(json);
   if (typeof text !== 'string' || !text.trim()) {
-    throw new ModelCallError('Gemini hat keine verwertbare Antwort geliefert.');
+    throw new ModelCallError('Gemini hat keine verwertbare Antwort geliefert.', 'Leer');
   }
-  const parsedJson = JSON.parse(text.replace(/^```json\s*|\s*```$/g, '').trim()) as RawAiNutritionPayload;
+  let parsedJson: RawAiNutritionPayload;
+  try {
+    parsedJson = JSON.parse(text.replace(/^```json\s*|\s*```$/g, '').trim()) as RawAiNutritionPayload;
+  } catch {
+    throw new ModelCallError('Die KI-Antwort enthielt keine gültigen Nährwerte.', 'Ungültig');
+  }
   const food = parseAiEstimatePayload(parsedJson, opts.queryClean || 'Foto-Mahlzeit');
   if (!food) {
-    throw new ModelCallError('Die KI-Antwort enthielt keine gültigen Nährwerte.');
+    throw new ModelCallError('Die KI-Antwort enthielt keine gültigen Nährwerte.', 'Ungültig');
   }
   food.usedModel = opts.model;
   return food;
@@ -582,22 +593,30 @@ export async function estimateMealWithAi(opts: EstimateMealOptions): Promise<AiE
   for (const m of [preferred, lastWorking, ...discovered, ...GEMINI_FALLBACK_MODELS]) {
     if (m && !models.includes(m)) models.push(m);
   }
-  const tryModels = models.slice(0, 3);
-  const timeoutMs = hasImage ? 12000 : 10000;
+  const tryModels = models.slice(0, 4);
+  const timeoutMs = hasImage ? 30000 : 20000;
 
-  // Hedged Execution: startet Modell #1 sofort; antwortet es nicht in 3,5 s oder scheitert,
-  // läuft Modell #2/#3 parallel mit – die erste gültige Antwort gewinnt und bricht den Rest ab.
+  // Hedged Execution: startet Modell #1 sofort; antwortet es nicht in 5 s oder scheitert,
+  // läuft das nächste Backup-Modell parallel mit – die erste gültige Antwort gewinnt und bricht den Rest ab.
   const winner = await new Promise<AiEstimatedFood>((resolve, reject) => {
     const raceCtrl = new AbortController();
-    const timers: number[] = [];
+    let hedgeTimer: ReturnType<typeof setTimeout> | null = null;
     let settled = false;
     let nextIndex = 0;
     let active = 0;
+    let firstSpecificError: ModelCallError | null = null;
     let lastError: Error | null = null;
+    const attempts: string[] = [];
+
+    const clearHedgeTimer = () => {
+      if (hedgeTimer !== null) {
+        clearTimeout(hedgeTimer);
+        hedgeTimer = null;
+      }
+    };
 
     const cleanup = () => {
-      for (const t of timers) window.clearTimeout(t);
-      timers.length = 0;
+      clearHedgeTimer();
       opts.signal?.removeEventListener('abort', onParentAbort);
     };
 
@@ -626,15 +645,22 @@ export async function estimateMealWithAi(opts: EstimateMealOptions): Promise<AiE
 
     const launchNext = () => {
       if (settled || nextIndex >= tryModels.length) return;
+      clearHedgeTimer();
       const idx = nextIndex++;
       const model = tryModels[idx];
       active += 1;
 
+      if (idx === 0) {
+        opts.onProgress?.(hasImage ? `Analysiere Foto (${model})…` : `Schätze mit ${model}…`);
+      } else {
+        opts.onProgress?.(`Prüfe parallel ${model}…`);
+      }
+
       if (nextIndex < tryModels.length) {
-        const hedgeTimer = window.setTimeout(() => {
+        hedgeTimer = setTimeout(() => {
+          hedgeTimer = null;
           launchNext();
         }, HEDGE_DELAY_MS);
-        timers.push(hedgeTimer);
       }
 
       trySingleModel({
@@ -656,12 +682,20 @@ export async function estimateMealWithAi(opts: EstimateMealOptions): Promise<AiE
             return;
           }
           if (err instanceof Error && err.name !== 'AbortError') {
+            const shortReason = err instanceof ModelCallError ? err.shortReason : 'Fehler';
+            attempts.push(`${model}: ${shortReason}`);
             lastError = err;
+            if (err instanceof ModelCallError && err.shortReason !== 'Timeout' && !firstSpecificError) {
+              firstSpecificError = err;
+            }
           }
           if (nextIndex < tryModels.length) {
             launchNext();
           } else if (active === 0) {
-            finishError(lastError || new Error('KI-Schätzung fehlgeschlagen.'));
+            if (lastWorking) saveLastWorkingModel('');
+            const baseErr = firstSpecificError || lastError || new Error('KI-Schätzung fehlgeschlagen.');
+            const diag = attempts.length > 0 ? ` (${attempts.join(', ')})` : '';
+            finishError(new Error(`${baseErr.message}${diag}`));
           }
         });
     };
