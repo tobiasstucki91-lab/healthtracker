@@ -355,21 +355,37 @@ function waitMs(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+export function thinkingConfigForModel(model: string): Record<string, unknown> | undefined {
+  if (/^gemini-3/i.test(model)) return { thinkingLevel: 'minimal' };
+  if (/^gemini-2\.5-/i.test(model)) return { thinkingBudget: 0 };
+  return undefined;
+}
+
+export function extractResponseText(json: unknown): string | null {
+  const parts = (json as { candidates?: Array<{ content?: { parts?: Array<{ text?: unknown; thought?: unknown }> } }> })
+    ?.candidates?.[0]?.content?.parts;
+  if (!Array.isArray(parts)) return null;
+  const nonThought = parts.find((p) => typeof p?.text === 'string' && !p.thought);
+  if (typeof nonThought?.text === 'string') return nonThought.text;
+  const anyText = parts.find((p) => typeof p?.text === 'string');
+  return typeof anyText?.text === 'string' ? anyText.text : null;
+}
+
 async function callGeminiOnce(opts: {
   model: string;
   key: string;
   parts: Array<Record<string, unknown>>;
-  disableThinking: boolean;
+  thinkingConfig?: Record<string, unknown>;
   signal?: AbortSignal;
 }): Promise<Response> {
   const generationConfig: Record<string, unknown> = {
     temperature: 0.2,
-    maxOutputTokens: 320,
+    maxOutputTokens: 1024,
     responseMimeType: 'application/json',
     responseSchema: RESPONSE_SCHEMA,
   };
-  if (opts.disableThinking) {
-    generationConfig.thinkingConfig = { thinkingBudget: 0 };
+  if (opts.thinkingConfig) {
+    generationConfig.thinkingConfig = opts.thinkingConfig;
   }
 
   const ctrl = new AbortController();
@@ -442,26 +458,26 @@ export async function estimateMealWithAi(opts: EstimateMealOptions): Promise<AiE
     }
 
     for (const model of tryModels) {
-      const wantsNoThink = /^gemini-(2\.5-|3\.|flash-latest)/i.test(model);
+      const thinkingConfig = thinkingConfigForModel(model);
       try {
         let res = await callGeminiOnce({
           model,
           key,
           parts,
-          disableThinking: wantsNoThink,
+          thinkingConfig,
           signal: opts.signal,
         });
 
-        // Falls ein Modell thinkingConfig nicht unterstützt (400), einmal ohne wiederholen
-        if (res.status === 400 && wantsNoThink) {
+        // Falls ein Modell thinkingConfig ablehnt (400 ohne API-Key-Fehler), einmal ohne wiederholen
+        if (res.status === 400 && thinkingConfig) {
           const errClone = await res.clone().json().catch(() => null);
           const errMsg = String(errClone?.error?.message || '');
-          if (/thinking/i.test(errMsg)) {
+          if (!/api key/i.test(errMsg)) {
             res = await callGeminiOnce({
               model,
               key,
               parts,
-              disableThinking: false,
+              thinkingConfig: undefined,
               signal: opts.signal,
             });
           }
@@ -488,11 +504,15 @@ export async function estimateMealWithAi(opts: EstimateMealOptions): Promise<AiE
           } catch {
             // ignorieren
           }
-          throw new Error(
-            msg && /api key/i.test(msg)
-              ? 'Gemini API-Key ungültig. Bitte unter Einstellungen → KI-Suche prüfen.'
-              : `Gemini-Anfrage abgelehnt (${res.status})${msg ? `: ${msg}` : ''}`
-          );
+          if (res.status === 401 || res.status === 403 || /api key/i.test(msg)) {
+            throw new Error(
+              msg && /api key/i.test(msg)
+                ? 'Gemini API-Key ungültig. Bitte unter Einstellungen → KI-Suche prüfen.'
+                : `Gemini-Anfrage abgelehnt (${res.status})${msg ? `: ${msg}` : ''}`
+            );
+          }
+          lastError = new Error(`Modell ${model} hat die Anfrage abgelehnt (400)${msg ? `: ${msg}` : ''}`);
+          continue;
         }
         if (!res.ok) {
           lastError = new Error(`Gemini-Fehler (${res.status})`);
@@ -500,7 +520,7 @@ export async function estimateMealWithAi(opts: EstimateMealOptions): Promise<AiE
         }
 
         const json = await res.json();
-        const text = json?.candidates?.[0]?.content?.parts?.[0]?.text;
+        const text = extractResponseText(json);
         if (typeof text !== 'string' || !text.trim()) {
           lastError = new Error('Gemini hat keine verwertbare Antwort geliefert.');
           continue;
@@ -521,7 +541,7 @@ export async function estimateMealWithAi(opts: EstimateMealOptions): Promise<AiE
           continue;
         }
         lastError = err instanceof Error ? err : new Error('KI-Schätzung fehlgeschlagen.');
-        if (/API-Key ungültig|abgelehnt/i.test(lastError.message)) throw lastError;
+        if (/API-Key ungültig|Gemini-Anfrage abgelehnt/i.test(lastError.message)) throw lastError;
       }
     }
   }

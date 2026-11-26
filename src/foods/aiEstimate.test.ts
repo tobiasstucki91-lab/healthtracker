@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { parseAiEstimatePayload, rankGeminiFlashModels } from './aiEstimate.ts';
+import {
+  extractResponseText,
+  parseAiEstimatePayload,
+  rankGeminiFlashModels,
+  thinkingConfigForModel,
+} from './aiEstimate.ts';
 
 test('parseAiEstimatePayload wandelt Gemini-JSON sauber in Food-Objekt um', () => {
   const food = parseAiEstimatePayload({
@@ -44,4 +49,29 @@ test('rankGeminiFlashModels bevorzugt aktuelle stabile Flash-Lite- und Flash-Mod
     'gemini-2.5-flash',
     'gemini-2.0-flash',
   ]);
+});
+
+test('thinkingConfigForModel wählt je Generation die passenden Parameter', () => {
+  assert.deepEqual(thinkingConfigForModel('gemini-3-flash-preview'), { thinkingLevel: 'minimal' });
+  assert.deepEqual(thinkingConfigForModel('gemini-3.5-flash'), { thinkingLevel: 'minimal' });
+  assert.deepEqual(thinkingConfigForModel('gemini-2.5-flash'), { thinkingBudget: 0 });
+  assert.deepEqual(thinkingConfigForModel('gemini-2.5-flash-lite'), { thinkingBudget: 0 });
+  assert.equal(thinkingConfigForModel('gemini-2.0-flash'), undefined);
+  assert.equal(thinkingConfigForModel('gemini-flash-latest'), undefined);
+});
+
+test('extractResponseText überspringt Thought-Parts und liefert das JSON-Part', () => {
+  const payload = {
+    candidates: [
+      {
+        content: {
+          parts: [
+            { thought: true, text: 'internes Nachdenken' },
+            { text: '{"name":"Apfel"}' },
+          ],
+        },
+      },
+    ],
+  };
+  assert.equal(extractResponseText(payload), '{"name":"Apfel"}');
 });
