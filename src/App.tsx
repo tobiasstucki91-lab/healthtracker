@@ -47,12 +47,9 @@ import {
   Minus,
   Target,
   RefreshCw,
-  FileSpreadsheet,
-  Link2,
   Cloud,
   Wifi,
   Radio,
-  Smartphone,
   House,
   SquareCheckBig,
   ScanBarcode,
@@ -1465,80 +1462,6 @@ function extractLocalizedProductName(value) {
   return '';
 }
 
-/**
- * Parst CSV-Exporte aus openScale (unterstützt Semikolon, Komma & Tab
- * sowie deutsche/ISO-Datumsformate und Komma-Dezimalzahlen).
- */
-function parseOpenScaleCsv(csvText) {
-  const lines = String(csvText || '')
-    .replace(/^\uFEFF/, '')
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean);
-
-  if (lines.length < 2) return [];
-
-  const firstLine = lines[0];
-  const delimiter = firstLine.includes(';')
-    ? ';'
-    : firstLine.includes('\t')
-    ? '\t'
-    : ',';
-
-  const splitRow = (row) =>
-    row
-      .split(delimiter)
-      .map((cell) => cell.replace(/^["']|["']$/g, '').trim());
-
-  const headers = splitRow(firstLine).map((h) => h.toLowerCase());
-  const dateIdx = headers.findIndex(
-    (h) => h.includes('date') || h.includes('datum') || h.includes('time') || h.includes('zeit')
-  );
-  const weightIdx = headers.findIndex(
-    (h) => h.includes('weight') || h.includes('gewicht') || h.includes('masse')
-  );
-
-  if (dateIdx === -1 || weightIdx === -1) {
-    return [];
-  }
-
-  const parsedEntries = [];
-
-  for (let i = 1; i < lines.length; i++) {
-    const cols = splitRow(lines[i]);
-    if (cols.length <= Math.max(dateIdx, weightIdx)) continue;
-
-    const rawDate = cols[dateIdx];
-    const rawWeight = cols[weightIdx].replace(',', '.').replace(/[^\d.]/g, '');
-    const weightVal = parseFloat(rawWeight);
-
-    if (isNaN(weightVal) || weightVal < 25 || weightVal > 350) continue;
-
-    let dateKey = null;
-    // ISO Format: YYYY-MM-DD (optional mit Uhrzeit)
-    const isoMatch = rawDate.match(/(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
-    // Deutsches Format: DD.MM.YYYY (optional mit Uhrzeit)
-    const deMatch = rawDate.match(/(\d{1,2})\.(\d{1,2})\.(\d{4})/);
-
-    if (isoMatch) {
-      const [, y, m, d] = isoMatch;
-      dateKey = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
-    } else if (deMatch) {
-      const [, d, m, y] = deMatch;
-      dateKey = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
-    }
-
-    if (dateKey && /^\d{4}-\d{2}-\d{2}$/.test(dateKey)) {
-      parsedEntries.push({
-        dateKey,
-        weight: Math.round(weightVal * 10) / 10,
-      });
-    }
-  }
-
-  return parsedEntries;
-}
-
 // ============================================================================
 // OPEN FOOD FACTS: ROBUSTER ABRUF (RETRY + CACHE)
 // ============================================================================
@@ -1552,8 +1475,9 @@ function parseOpenScaleCsv(csvText) {
 const OFF_FIELDS =
   'code,product_name,product_name_de,brands,nutriments,serving_size,serving_quantity,nutrition_grades,nutriscore_grade';
 const OFF_CACHE_KEY = 'hht_off_cache_v1';
-const OFF_CACHE_MAX = 80;
-const OFF_CACHE_FRESH_MS = 3 * 24 * 60 * 60 * 1000;
+const OFF_CACHE_MAX = 200;
+const OFF_CACHE_FRESH_MS = 14 * 24 * 60 * 60 * 1000;
+let offCacheMem = null;
 
 class OffHttpError extends Error {
   constructor(status) {
@@ -1579,13 +1503,13 @@ function waitWithSignal(ms, signal) {
   });
 }
 
-const OFF_BACKOFF_MS = [1000, 2500, 5000];
+const OFF_BACKOFF_MS = [600, 1400];
 
 // Einzelner Abruf mit eigenem Timeout und Wiederholung bei 429/5xx/Netzfehler
-async function offFetchJson(url, signal, { retries = 2, timeoutMs = 8000 } = {}) {
+async function offFetchJson(url, signal, { retries = 1, timeoutMs = 5500 } = {}) {
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
-    if (attempt > 0) await waitWithSignal(OFF_BACKOFF_MS[attempt - 1] ?? 4000, signal);
+    if (attempt > 0) await waitWithSignal(OFF_BACKOFF_MS[attempt - 1] ?? 1400, signal);
     const ctrl = new AbortController();
     const onAbort = () => ctrl.abort();
     signal?.addEventListener('abort', onAbort, { once: true });
@@ -1608,11 +1532,13 @@ async function offFetchJson(url, signal, { retries = 2, timeoutMs = 8000 } = {})
 }
 
 function readOffCache() {
+  if (offCacheMem !== null) return offCacheMem;
   try {
-    return JSON.parse(localStorage.getItem(OFF_CACHE_KEY) || '{}') || {};
+    offCacheMem = JSON.parse(localStorage.getItem(OFF_CACHE_KEY) || '{}') || {};
   } catch {
-    return {};
+    offCacheMem = {};
   }
+  return offCacheMem;
 }
 
 function getOffCache(key) {
@@ -1621,7 +1547,7 @@ function getOffCache(key) {
   return { results: entry.results, fresh: Date.now() - entry.t < OFF_CACHE_FRESH_MS };
 }
 
-// Durchsucht alle früher geladenen Produkte (für Ausfälle von Open Food Facts)
+// Durchsucht alle früher geladenen Produkte im Speicher (0 ms)
 function searchOffCacheLocal(query) {
   const tokens = normalizeSearchText(query).split(/\s+/).filter(Boolean);
   if (tokens.length === 0) return [];
@@ -1642,7 +1568,7 @@ function searchOffCacheLocal(query) {
 
 function putOffCache(key, results) {
   try {
-    const cache = readOffCache();
+    const cache = { ...readOffCache() };
     cache[key] = { t: Date.now(), results };
     const keys = Object.keys(cache);
     if (keys.length > OFF_CACHE_MAX) {
@@ -1651,19 +1577,20 @@ function putOffCache(key, results) {
         .slice(0, keys.length - OFF_CACHE_MAX)
         .forEach((k) => delete cache[k]);
     }
+    offCacheMem = cache;
     localStorage.setItem(OFF_CACHE_KEY, JSON.stringify(cache));
   } catch {
     // Speicher voll o. ä.: Cache ist optional
   }
 }
 
-// Barcode-Lookup über die Produkt-API (mit Wiederholungen)
+// Barcode-Lookup über die Produkt-API (schnell, mit Wiederholungen)
 async function offLookupBarcode(code, signal) {
   try {
     const data = await offFetchJson(
       `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json?fields=${OFF_FIELDS}`,
       signal,
-      { retries: 3 }
+      { retries: 2, timeoutMs: 5000 }
     );
     if (data.status === 1 && data.product) return { found: true, product: data.product };
     return { found: false };
@@ -1673,14 +1600,14 @@ async function offLookupBarcode(code, signal) {
   }
 }
 
-// Textsuche über die Volltextsuche (mit Wiederholungen bei Überlastung)
+// Textsuche über die Volltextsuche (schlanke Antwort & kurzes Timeout)
 async function offSearchText(query, signal) {
   const data = await offFetchJson(
     `https://de.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(
       query
-    )}&search_simple=1&action=process&json=1&page_size=20&fields=${OFF_FIELDS}`,
+    )}&search_simple=1&action=process&json=1&page_size=12&fields=${OFF_FIELDS}`,
     signal,
-    { retries: 3, timeoutMs: 10000 }
+    { retries: 1, timeoutMs: 5500 }
   );
   const products = Array.isArray(data.products) ? data.products : [];
   const parsedList = products.map(parseOpenFoodFactsProduct).filter(Boolean);
@@ -1692,7 +1619,7 @@ async function offSearchText(query, signal) {
     if (aMatch !== bMatch) return aMatch - bMatch;
     return (a.hasGermanName ? 0 : 1) - (b.hasGermanName ? 0 : 1);
   });
-  return parsedList.slice(0, 15);
+  return parsedList.slice(0, 12);
 }
 
 // ============================================================================
@@ -1934,20 +1861,63 @@ function loadInitialState() {
 // HAUPTKOMPONENTE
 // ============================================================================
 
+const OAUTH_RETURN_VIEW_KEY = 'hht_oauth_return_view';
+let cachedOAuthReturnView;
+
+function consumeOAuthReturnView() {
+  if (cachedOAuthReturnView !== undefined) return cachedOAuthReturnView;
+  cachedOAuthReturnView = null;
+  try {
+    const raw = sessionStorage.getItem(OAUTH_RETURN_VIEW_KEY);
+    if (!raw) return null;
+    sessionStorage.removeItem(OAUTH_RETURN_VIEW_KEY);
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    // Nur innerhalb von 2 Minuten nach dem Redirect wiederherstellen
+    if (typeof parsed.savedAt !== 'number' || Date.now() - parsed.savedAt > 120_000) return null;
+    cachedOAuthReturnView = parsed;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 export default function App() {
+  const restoredNav = useMemo(() => consumeOAuthReturnView(), []);
   const notifyRef = useRef(null);
+  const navStateRef = useRef(null);
   const { appData, setAppData, sync } = useSyncedAppData({
     storageKey: STORAGE_KEY,
     defaultTargets: DEFAULT_TARGETS,
     loadInitial: loadInitialState,
     normalize: normalizeAppData,
     notify: (message, accent) => notifyRef.current?.(message, accent),
+    beforeRedirect: () => {
+      try {
+        if (navStateRef.current) {
+          sessionStorage.setItem(
+            OAUTH_RETURN_VIEW_KEY,
+            JSON.stringify({ ...navStateRef.current, savedAt: Date.now() })
+          );
+        }
+      } catch {
+        // ignorieren
+      }
+    },
   });
-  const [selectedDate, setSelectedDate] = useState(getTodayKey);
+  const [selectedDate, setSelectedDate] = useState(() =>
+    typeof restoredNav?.selectedDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(restoredNav.selectedDate)
+      ? restoredNav.selectedDate
+      : getTodayKey()
+  );
   const [multiplier, setMultiplier] = useState(1);
 
-  // Hauptansicht: 'daily' (Kalorien, Makros & Habits) | 'weight' (Gewichtsdaten)
-  const [activeView, setActiveView] = useState('daily');
+  // Hauptansicht: 'daily' (Kalorien, Makros & Habits) | 'training' | 'weight' (Gewichtsdaten)
+  const [activeView, setActiveView] = useState(() =>
+    restoredNav?.activeView === 'training' || restoredNav?.activeView === 'weight'
+      ? restoredNav.activeView
+      : 'daily'
+  );
 
   // Gewichtsdaten State
   const [weightInput, setWeightInput] = useState('');
@@ -1957,10 +1927,20 @@ export default function App() {
   const [goalWeightInput, setGoalWeightInput] = useState('');
 
   // Mobile Filter-Ansicht ('all' | 'food' | 'habits')
-  const [mobileSection, setMobileSection] = useState('all');
+  const [mobileSection, setMobileSection] = useState(() =>
+    restoredNav?.mobileSection === 'habits' || restoredNav?.mobileSection === 'food'
+      ? restoredNav.mobileSection
+      : 'all'
+  );
 
   // Haupt-Tabs in der Mahlzeitenerfassung: 'search' | 'meals' | 'favorites' | 'manual'
-  const [entryTab, setEntryTab] = useState('search');
+  const [entryTab, setEntryTab] = useState(() =>
+    ['search', 'meals', 'favorites', 'manual'].includes(restoredNav?.entryTab)
+      ? restoredNav.entryTab
+      : 'search'
+  );
+
+  navStateRef.current = { selectedDate, activeView, mobileSection, entryTab };
 
   // Nahrungsmittel-Suche & Filter-Pills ('all' | 'basis' | 'off')
   const [searchQuery, setSearchQuery] = useState('');
@@ -2004,6 +1984,7 @@ export default function App() {
   const [lastLoggedFavId, setLastLoggedFavId] = useState(null);
   const [editingFavorites, setEditingFavorites] = useState(false);
   const [editingFavItem, setEditingFavItem] = useState(null);
+  const [editingLogItem, setEditingLogItem] = useState(null);
 
   // Manuelle Schnelleingabe State
   const [mealName, setMealName] = useState('');
@@ -2025,15 +2006,10 @@ export default function App() {
   const [confirmReset, setConfirmReset] = useState(false);
   const [importFeedback, setImportFeedback] = useState(null);
 
-  // openScale Sync & CSV-Import Modal
-  const [isOpenScaleModalOpen, setIsOpenScaleModalOpen] = useState(false);
-  const [openScaleCopied, setOpenScaleCopied] = useState(false);
-  const [syncTab, setSyncTab] = useState('auto'); // 'auto' | 'csv'
-  const openScaleCsvInputRef = useRef(null);
-
   // Barcode-Foto-Scanner Modal
   const [isScannerOpen, setIsScannerOpen] = useState(false);
   const autoSelectBarcodeRef = useRef(false);
+  const [barcodeScrollNonce, setBarcodeScrollNonce] = useState(0);
 
   // Sonner-Toast & Undo Historie
   const [toast, setToast] = useState(null);
@@ -2041,56 +2017,13 @@ export default function App() {
   const toastTimeoutRef = useRef(null);
   const fileInputRef = useRef(null);
   const searchInputRef = useRef(null);
+  const foodEntrySectionRef = useRef(null);
 
   const todayKey = getTodayKey();
 
   // Seitentitel aktualisieren
   useEffect(() => {
     document.title = 'Health & Habit Tracker';
-  }, []);
-
-  // Automatischer openScale Webhook/URL-Import beim Öffnen (?openscale_weight=81.4&openscale_date=2026-11-17)
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-
-    const params = new URLSearchParams(window.location.search);
-    const rawW = params.get('openscale_weight') || params.get('weight');
-    if (!rawW) return;
-
-    const normalizedW = parseFloat(String(rawW).replace(',', '.'));
-    if (isNaN(normalizedW) || normalizedW < 25 || normalizedW > 350) return;
-
-    const roundedW = Math.round(normalizedW * 10) / 10;
-    const rawD = params.get('openscale_date') || params.get('date');
-    const targetDateKey =
-      rawD && /^\d{4}-\d{2}-\d{2}$/.test(rawD) ? rawD : getTodayKey();
-
-    setAppData((prev) => ({
-      ...prev,
-      weightsByDate: {
-        ...(prev.weightsByDate || {}),
-        [targetDateKey]: roundedW,
-      },
-    }));
-    setSelectedDate(targetDateKey);
-    setActiveView('weight');
-
-    // URL-Parameter bereinigen, damit beim Reload nicht doppelt getriggert wird
-    params.delete('openscale_weight');
-    params.delete('openscale_date');
-    params.delete('weight');
-    params.delete('date');
-    const nextSearch = params.toString();
-    const cleanUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash}`;
-    window.history.replaceState({}, '', cleanUrl);
-
-    setTimeout(() => {
-      showToast(
-        `openScale Auto-Sync: ${formatWeightDE(roundedW)} kg (${targetDateKey}) eingetragen`,
-        null,
-        'emerald'
-      );
-    }, 150);
   }, []);
 
   // ==========================================================================
@@ -2166,35 +2099,62 @@ export default function App() {
 
   const isBarcodeQuery = useMemo(() => /^\d{8,14}$/.test(searchQuery.trim()), [searchQuery]);
 
+  // BLS 4.0 (7.100 Lebensmittel) im Leerlauf vorladen, damit die erste Suche bei 0 ms startet
+  useEffect(() => {
+    let timer = null;
+    let idleId = null;
+    const warm = () => {
+      loadBlsIndex().catch(() => {});
+    };
+    if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
+      idleId = window.requestIdleCallback(warm, { timeout: 1500 });
+    } else {
+      timer = setTimeout(warm, 800);
+    }
+    return () => {
+      if (idleId !== null && typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(idleId);
+      }
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, []);
+
   useEffect(() => {
     const trimmed = searchQuery.trim();
+    const isCode = /^\d{8,14}$/.test(trimmed);
 
-    if (trimmed.length < 3) {
+    if (trimmed.length < 2) {
       setOffResults([]);
       setIsSearchingOff(false);
       setOffError(null);
       return;
     }
 
-    const isCode = /^\d{8,14}$/.test(trimmed);
     const cacheKey = isCode ? `ean:${trimmed}` : `q:${trimmed.toLowerCase()}`;
     const cached = getOffCache(cacheKey);
+    const instantLocalOff = cached ? cached.results : isCode ? [] : searchOffCacheLocal(trimmed);
 
-    // Frischer Treffer im lokalen Cache: sofort anzeigen, kein Netzabruf
-    if (cached && cached.fresh && offRetryNonce === 0) {
-      setOffResults(cached.results);
+    // 0-ms Sofort-Treffer aus lokalem Cache (auch Teil-Übereinstimmungen früherer Suchen)
+    setOffResults(instantLocalOff);
+    setOffError(null);
+
+    // Frischer exakter Cache-Treffer, zu kurzer Suchbegriff (< 3) oder reiner Lokal-Filter: kein Netzabruf nötig
+    if ((cached && cached.fresh && offRetryNonce === 0) || (!isCode && trimmed.length < 3) || (!isCode && sourceFilter === 'local')) {
       setIsSearchingOff(false);
-      setOffError(isCode && cached.results.length === 0 ? `Kein Produkt für Barcode ${trimmed} gefunden.` : null);
+      setOffError(
+        cached && cached.fresh && isCode && cached.results.length === 0
+          ? `Kein Produkt für Barcode ${trimmed} gefunden.`
+          : null
+      );
       return;
     }
 
     const controller = new AbortController();
-    const delayMs = isCode ? 150 : 600;
+    const delayMs = isCode ? 100 : 350;
 
     const timer = setTimeout(async () => {
       setIsSearchingOff(true);
       setOffError(null);
-      if (cached) setOffResults(cached.results);
 
       try {
         if (isCode) {
@@ -2211,20 +2171,24 @@ export default function App() {
           }
         } else {
           const results = await offSearchText(trimmed, controller.signal);
-          setOffResults(results);
-          if (results.length > 0) putOffCache(cacheKey, results);
+          if (results.length > 0) {
+            const seenIds = new Set(results.map((r) => r.id));
+            const merged = [...results, ...instantLocalOff.filter((r) => !seenIds.has(r.id))].slice(0, 15);
+            setOffResults(merged);
+            putOffCache(cacheKey, results);
+          } else if (instantLocalOff.length === 0) {
+            setOffResults([]);
+          }
         }
       } catch (err) {
         if (err.name === 'AbortError') return;
         const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
-        // Kein exakter Cache-Treffer: in allen früher geladenen Produkten suchen
-        const fallback = cached ? cached.results : isCode ? [] : searchOffCacheLocal(trimmed);
-        if (fallback.length > 0) {
-          setOffResults(fallback);
+        if (instantLocalOff.length > 0) {
+          setOffResults(instantLocalOff);
           setOffError({
             text: offline
-              ? 'Offline – zeige gespeicherte Ergebnisse.'
-              : 'Open Food Facts gerade überlastet – zeige gespeicherte Ergebnisse.',
+              ? 'Offline – zeige gespeicherte Markenprodukte.'
+              : 'Open Food Facts antwortet gerade langsam – zeige gespeicherte Treffer.',
             retry: !offline,
           });
         } else {
@@ -2232,7 +2196,7 @@ export default function App() {
           setOffError({
             text: offline
               ? 'Offline – Basis-DB und BLS sind weiter verfügbar.'
-              : 'Open Food Facts ist gerade überlastet. Basis-DB und BLS bleiben verfügbar.',
+              : 'Open Food Facts antwortet gerade langsam. Basis-DB und BLS bleiben sofort verfügbar.',
             retry: !offline,
           });
         }
@@ -2247,7 +2211,7 @@ export default function App() {
       clearTimeout(timer);
       controller.abort();
     };
-  }, [searchQuery, offRetryNonce]);
+  }, [searchQuery, offRetryNonce, sourceFilter]);
 
   // Neue Suchanfrage: manuellen Retry-Zähler zurücksetzen
   useEffect(() => {
@@ -2352,36 +2316,140 @@ export default function App() {
     }
   }, [offResults, isSearchingOff, isBarcodeQuery, offError]);
 
+  // Nach Barcode-Scan aus beliebigem Tab direkt zur Lebensmittelsuche scrollen
+  useEffect(() => {
+    if (barcodeScrollNonce === 0) return;
+    if (activeView !== 'daily' || entryTab !== 'search' || mobileSection === 'habits') return;
+    const raf = requestAnimationFrame(() => {
+      foodEntrySectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [barcodeScrollNonce, activeView, entryTab, mobileSection]);
+
   const handleBarcodeDetected = (code) => {
-    autoSelectBarcodeRef.current = true;
+    const sameBarcodeLoaded =
+      searchQuery.trim() === code && !isSearchingOff && offResults.length === 1;
     setIsScannerOpen(false);
+    setActiveView('daily');
+    setMobileSection('all');
+    setEntryTab('search');
     setSourceFilter('all');
-    setSearchQuery(code);
+    if (sameBarcodeLoaded) {
+      autoSelectBarcodeRef.current = false;
+      handleSelectFoodForCalculator(offResults[0]);
+    } else {
+      autoSelectBarcodeRef.current = true;
+      setSelectedFood(null);
+      setSearchQuery(code);
+    }
+    setBarcodeScrollNonce((n) => n + 1);
     if (typeof navigator !== 'undefined' && navigator.vibrate) {
       navigator.vibrate(60);
     }
     showToast(`Barcode erkannt: ${code}`, null, 'emerald');
   };
 
-  // Gefilterte Suchergebnisse gemäß Filter-Pill ('all' | 'basis' | 'bls' | 'off')
-  // Suche immer in allen Quellen: Basis-DB, BLS, Open Food Facts
-  const filteredSearchResults = useMemo(
-    () => [...localBasisResults, ...blsResults.slice(0, 12), ...offResults],
-    [localBasisResults, blsResults, offResults]
-  );
+  // 0-ms Suche in eigenen Favoriten & gespeicherten Mahlzeiten
+  const localPersonalResults = useMemo(() => {
+    const trimmed = searchQuery.trim();
+    if (trimmed.length < 2 || isBarcodeQuery || sourceFilter === 'off') return [];
+    const tokens = normalizeSearchText(trimmed).split(/\s+/).filter(Boolean);
+    if (tokens.length === 0) return [];
+
+    const matches = (name) => {
+      const hay = normalizeSearchText(name || '');
+      return tokens.every((t) => hay.includes(t));
+    };
+
+    const mealHits = (appData.savedMeals || [])
+      .filter((m) => matches(m.name))
+      .slice(0, 3)
+      .map((meal) => {
+        const totals = (meal.items || []).reduce(
+          (acc, entry) => {
+            const ratio = Math.max(0, Number(entry.grams) || 0) / 100;
+            return {
+              calories: acc.calories + (entry.food?.calories || 0) * ratio,
+              protein: acc.protein + (entry.food?.protein || 0) * ratio,
+              carbs: acc.carbs + (entry.food?.carbs || 0) * ratio,
+              fat: acc.fat + (entry.food?.fat || 0) * ratio,
+            };
+          },
+          { calories: 0, protein: 0, carbs: 0, fat: 0 }
+        );
+        return {
+          kind: 'meal',
+          id: `pers-meal-${meal.id}`,
+          meal,
+          name: meal.name,
+          calories: Math.round(totals.calories),
+          protein: Math.round(totals.protein * 10) / 10,
+          carbs: Math.round(totals.carbs * 10) / 10,
+          fat: Math.round(totals.fat * 10) / 10,
+        };
+      });
+
+    const favHits = (appData.favorites || [])
+      .filter((f) => matches(f.name))
+      .slice(0, 4)
+      .map((fav) => ({
+        kind: 'favorite',
+        id: `pers-fav-${fav.id}`,
+        fav,
+        name: fav.name,
+        calories: Math.round(fav.calories),
+        protein: Math.round(fav.protein * 10) / 10,
+        carbs: Math.round(fav.carbs * 10) / 10,
+        fat: Math.round(fav.fat * 10) / 10,
+      }));
+
+    return [...favHits, ...mealHits];
+  }, [searchQuery, isBarcodeQuery, sourceFilter, appData.favorites, appData.savedMeals]);
+
+  // Gefilterte Suchergebnisse gemäß Quellen-Filter ('all' | 'local' | 'off')
+  const filteredSearchResults = useMemo(() => {
+    if (sourceFilter === 'local') return [...localBasisResults, ...blsResults.slice(0, 20)];
+    if (sourceFilter === 'off') return offResults;
+    return [...localBasisResults, ...blsResults.slice(0, 12), ...offResults];
+  }, [sourceFilter, localBasisResults, blsResults, offResults]);
+
+  // Zuletzt geloggte Einträge (1-Tap-Wiederholung bei leerem Suchfeld)
+  const recentLoggedMeals = useMemo(() => {
+    const byDate = appData.logsByDate || {};
+    const dates = Object.keys(byDate).sort().reverse();
+    const seen = new Set();
+    const out = [];
+    for (const d of dates) {
+      const list = Array.isArray(byDate[d]) ? [...byDate[d]].reverse() : [];
+      for (const item of list) {
+        if (!item?.name) continue;
+        const key = item.name.trim().toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(item);
+        if (out.length >= 6) return out;
+      }
+    }
+    return out;
+  }, [appData.logsByDate]);
 
   const quickPickFoods = useMemo(() => {
     return QUICK_PICK_IDS.map((id) => GERMAN_BASIS_FOODS.find((f) => f.id === id)).filter(Boolean);
   }, []);
 
+  const parseDecimalInput = (raw) => {
+    const n = parseFloat(String(raw ?? '').replace(',', '.'));
+    return Number.isFinite(n) && n >= 0 ? n : 0;
+  };
+
   // Live-Berechnung im Grammatur-Rechner
   const calculatedFoodMacros = useMemo(() => {
     if (!selectedFood) return null;
     const unit = amountUnit === 'unit' ? getPieceUnit(selectedFood) : null;
-    const count = Math.max(0, parseFloat(String(unitCountInput).replace(',', '.')) || 0);
+    const count = parseDecimalInput(unitCountInput);
     const grams = unit
       ? Math.round(count * unit.grams * 10) / 10
-      : Math.max(0, parseFloat(gramsInput) || 0);
+      : parseDecimalInput(gramsInput);
     const factor = grams / 100;
     return {
       grams,
@@ -2471,9 +2539,9 @@ export default function App() {
 
   // Auto-berechnete Kalorien für die manuelle Schnelleingabe
   const autoCalculatedCalories = useMemo(() => {
-    const p = parseFloat(proteinInput) || 0;
-    const c = parseFloat(carbsInput) || 0;
-    const f = parseFloat(fatInput) || 0;
+    const p = parseDecimalInput(proteinInput);
+    const c = parseDecimalInput(carbsInput);
+    const f = parseDecimalInput(fatInput);
     return Math.round(p * 4 + c * 4 + f * 9);
   }, [proteinInput, carbsInput, fatInput]);
 
@@ -2778,77 +2846,6 @@ export default function App() {
     showToast(`Zielgewicht gesetzt: ${formatWeightDE(parsed)} kg`, null, 'emerald');
   };
 
-  // openScale CSV-Datei importieren
-  const handleImportOpenScaleCsv = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const text = event.target?.result;
-      const entries = parseOpenScaleCsv(text);
-
-      if (entries.length === 0) {
-        showToast(
-          'Keine gültigen openScale-Gewichtsdaten in der CSV gefunden',
-          null,
-          'amber'
-        );
-        return;
-      }
-
-      const snapshot = appData;
-      setAppData((prev) => {
-        const merged = { ...(prev.weightsByDate || {}) };
-        for (const item of entries) {
-          merged[item.dateKey] = item.weight;
-        }
-        return {
-          ...prev,
-          weightsByDate: merged,
-        };
-      });
-
-      const newest = entries.sort((a, b) => a.dateKey.localeCompare(b.dateKey))[
-        entries.length - 1
-      ];
-      if (newest) {
-        setSelectedDate(newest.dateKey);
-      }
-
-      setIsOpenScaleModalOpen(false);
-      showToast(
-        `openScale Import: ${entries.length} ${
-          entries.length === 1 ? 'Messwert' : 'Messwerte'
-        } übernommen`,
-        snapshot,
-        'emerald'
-      );
-    };
-    reader.readAsText(file);
-    e.target.value = '';
-  };
-
-  // openScale Sync-URL generieren & kopieren
-  const openScaleWebhookUrl = useMemo(() => {
-    if (typeof window === 'undefined') {
-      return 'https://deine-app.url/?openscale_weight={weight}&openscale_date={date}';
-    }
-    const base = `${window.location.origin}${window.location.pathname}`;
-    return `${base}?openscale_weight={weight}&openscale_date={date}`;
-  }, []);
-
-  const handleCopyOpenScaleUrl = async () => {
-    try {
-      await navigator.clipboard.writeText(openScaleWebhookUrl);
-      setOpenScaleCopied(true);
-      setTimeout(() => setOpenScaleCopied(false), 2500);
-      showToast('openScale Sync-Link in Zwischenablage kopiert', null, 'emerald');
-    } catch {
-      showToast('Link konnte nicht automatisch kopiert werden', null, 'amber');
-    }
-  };
-
   // ==========================================================================
   // AKTIONEN: MAHLZEITEN, GRAMMATUR-RECHNER, BAUKASTEN & FAVORITEN
   // ==========================================================================
@@ -3135,10 +3132,10 @@ export default function App() {
 
   const handleQuickAddSubmit = (e) => {
     e.preventDefault();
-    const p = parseFloat(proteinInput) || 0;
-    const c = parseFloat(carbsInput) || 0;
-    const f = parseFloat(fatInput) || 0;
-    const explicitKcal = caloriesInput.trim() !== '' ? parseFloat(caloriesInput) : null;
+    const p = parseDecimalInput(proteinInput);
+    const c = parseDecimalInput(carbsInput);
+    const f = parseDecimalInput(fatInput);
+    const explicitKcal = caloriesInput.trim() !== '' ? parseDecimalInput(caloriesInput) : null;
     const finalKcal =
       explicitKcal !== null && !isNaN(explicitKcal) ? explicitKcal : autoCalculatedCalories;
 
@@ -3204,7 +3201,35 @@ export default function App() {
         [selectedDate]: (prev.logsByDate[selectedDate] || []).filter((m) => m.id !== mealId),
       },
     }));
+    if (editingLogItem?.id === mealId) setEditingLogItem(null);
     showToast('Eintrag gelöscht', snapshot, 'amber');
+  };
+
+  const handleSaveEditedLog = (e) => {
+    e.preventDefault();
+    if (!editingLogItem) return;
+    const cleanName = editingLogItem.name.trim();
+    if (!cleanName) return;
+    const snapshot = appData;
+    const p = Math.round(parseDecimalInput(editingLogItem.protein) * 10) / 10;
+    const c = Math.round(parseDecimalInput(editingLogItem.carbs) * 10) / 10;
+    const f = Math.round(parseDecimalInput(editingLogItem.fat) * 10) / 10;
+    const kcalRaw = String(editingLogItem.calories ?? '').trim();
+    const kcal = kcalRaw === '' ? Math.round(p * 4 + c * 4 + f * 9) : Math.round(parseDecimalInput(kcalRaw));
+
+    setAppData((prev) => ({
+      ...prev,
+      logsByDate: {
+        ...prev.logsByDate,
+        [selectedDate]: (prev.logsByDate[selectedDate] || []).map((m) =>
+          m.id === editingLogItem.id
+            ? { ...m, name: cleanName, calories: kcal, protein: p, carbs: c, fat: f }
+            : m
+        ),
+      },
+    }));
+    setEditingLogItem(null);
+    showToast('Eintrag aktualisiert', snapshot, 'emerald');
   };
 
   const handleDuplicateMeal = (meal) => {
@@ -3322,6 +3347,13 @@ export default function App() {
         const { perWeek: _old, ...rest } = h;
         return perWeek > 0 ? { ...rest, perWeek } : rest;
       }),
+    }));
+  };
+
+  const handleRenameHabit = (habitId, title) => {
+    setAppData((prev) => ({
+      ...prev,
+      habits: prev.habits.map((h) => (h.id === habitId ? { ...h, title } : h)),
     }));
   };
 
@@ -3504,6 +3536,17 @@ export default function App() {
             importedData.weightsByDate && typeof importedData.weightsByDate === 'object'
               ? importedData.weightsByDate
               : {},
+          exercises:
+            Array.isArray(importedData.exercises) && importedData.exercises.length > 0
+              ? importedData.exercises
+              : DEFAULT_EXERCISES,
+          workoutTemplates: Array.isArray(importedData.workoutTemplates)
+            ? importedData.workoutTemplates
+            : [],
+          workoutsByDate:
+            importedData.workoutsByDate && typeof importedData.workoutsByDate === 'object'
+              ? importedData.workoutsByDate
+              : {},
         });
 
         sync.markHold('import');
@@ -3529,6 +3572,9 @@ export default function App() {
       logsByDate: {},
       habitChecksByDate: {},
       weightsByDate: {},
+      exercises: [...DEFAULT_EXERCISES],
+      workoutTemplates: [],
+      workoutsByDate: {},
     };
     setAppData(fresh);
     sync.markHold('reset');
@@ -3689,31 +3735,31 @@ export default function App() {
           </div>
 
           {/* Datums-Stepper (< Gestern | Heute + nativer Picker | Morgen >) */}
-          <div className="flex items-center gap-1.5">
-            <div className="flex items-center bg-zinc-900/90 border border-zinc-800 rounded-xl p-1 shadow-inner">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <div className="flex items-center bg-zinc-900/90 border border-zinc-800 rounded-xl p-0.5 sm:p-1 shadow-inner min-w-0">
               <button
                 type="button"
                 onClick={() => setSelectedDate((d) => addDays(d, -1))}
                 aria-label="Vorheriger Tag"
-                className="p-1.5 sm:p-2 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 active:scale-95 transition"
+                className="w-9 h-9 sm:w-auto sm:h-auto sm:p-2 flex items-center justify-center rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 active:scale-95 transition shrink-0"
               >
                 <ChevronLeft className="w-4 h-4" />
               </button>
 
-              <div className="relative flex items-center group rounded-lg hover:bg-zinc-800/80 transition">
+              <div className="relative flex items-center group rounded-lg hover:bg-zinc-800/80 transition min-w-0">
                 <div
                   aria-hidden="true"
-                  className="px-2.5 sm:px-3 py-1 flex items-center gap-2 text-left pointer-events-none"
+                  className="px-1.5 sm:px-3 py-1 flex items-center gap-1.5 sm:gap-2 text-left pointer-events-none"
                 >
-                  <div className="text-center min-w-[98px] sm:min-w-[126px]">
-                    <div className="text-xs sm:text-sm font-semibold text-zinc-100 leading-tight">
+                  <div className="text-center min-w-[78px] sm:min-w-[126px]">
+                    <div className="text-xs sm:text-sm font-semibold text-zinc-100 leading-tight truncate">
                       {dateHeader.badge}
                     </div>
-                    <div className="text-[11px] text-zinc-400 leading-tight">
+                    <div className="text-[10px] sm:text-[11px] text-zinc-400 leading-tight truncate">
                       {dateHeader.sub}
                     </div>
                   </div>
-                  <Calendar className="w-3.5 h-3.5 text-zinc-500 group-hover:text-emerald-400 transition shrink-0" />
+                  <Calendar className="w-3.5 h-3.5 text-zinc-500 group-hover:text-emerald-400 transition shrink-0 hidden min-[370px]:block" />
                 </div>
 
                 <input
@@ -3731,7 +3777,7 @@ export default function App() {
                 type="button"
                 onClick={() => setSelectedDate((d) => addDays(d, 1))}
                 aria-label="Nächster Tag"
-                className="p-1.5 sm:p-2 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 active:scale-95 transition"
+                className="w-9 h-9 sm:w-auto sm:h-auto sm:p-2 flex items-center justify-center rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 active:scale-95 transition shrink-0"
               >
                 <ChevronRight className="w-4 h-4" />
               </button>
@@ -3742,7 +3788,7 @@ export default function App() {
                 variant="outline"
                 size="xs"
                 onClick={() => setSelectedDate(todayKey)}
-                className="border-emerald-500/30 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20"
+                className="border-emerald-500/30 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 h-9 sm:h-7 px-2 sm:px-2.5 shrink-0"
               >
                 Heute
               </Button>
@@ -3834,20 +3880,23 @@ export default function App() {
         {/* ANSICHT A: KALORIEN, MAKROS & HABITS                               */}
         {/* ================================================================== */}
         {activeView === 'daily' && (
-          <div className="space-y-8 sm:space-y-10">
+          <div className="flex flex-col gap-8 sm:gap-10">
             {/* ============================================================== */}
             {/* BENTO-DASHBOARD: KALORIEN-GAUGE & MAKRO-BALKEN                 */}
             {/* ============================================================== */}
-            <section aria-labelledby="zone-bilanz" className="space-y-3">
+            <section
+              aria-labelledby="zone-bilanz"
+              className={`space-y-3 ${mobileSection === 'habits' ? 'hidden sm:block' : 'block'}`}
+            >
               <ZoneHeader
                 id="zone-bilanz"
                 title="Tagesbilanz"
                 right={<span>Ziel {formatNumberDE(appData.targets.calories)} kcal</span>}
               />
-              <div className="rounded-2xl bg-zinc-900 border border-zinc-700/80 shadow-[0_8px_24px_rgba(0,0,0,0.35)] p-4 sm:p-6 grid grid-cols-1 lg:grid-cols-12 gap-5 lg:gap-8 items-center">
+              <div className="rounded-2xl bg-zinc-900 border border-zinc-700/80 shadow-[0_8px_24px_rgba(0,0,0,0.35)] p-3.5 sm:p-6 grid grid-cols-1 lg:grid-cols-12 gap-3.5 sm:gap-5 lg:gap-8 items-center">
               {/* Links: Kalorien Radial-Gauge (5 Spalten) */}
-              <div className="lg:col-span-5 flex items-center justify-between gap-4">
-                <div className="space-y-2.5 min-w-0">
+              <div className="lg:col-span-5 flex items-center justify-between gap-3 sm:gap-4">
+                <div className="space-y-1.5 sm:space-y-2.5 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400">
                       Kalorien-Budget
@@ -3856,7 +3905,7 @@ export default function App() {
                   </div>
 
                   <div className="flex items-baseline gap-1.5">
-                    <span className="text-3xl sm:text-4xl font-bold tracking-tight text-zinc-50 tabular-nums">
+                    <span className="text-2xl sm:text-4xl font-bold tracking-tight text-zinc-50 tabular-nums">
                       {formatNumberDE(totals.calories)}
                     </span>
                     <span className="text-xs sm:text-sm text-zinc-400 tabular-nums">
@@ -3882,8 +3931,8 @@ export default function App() {
                 </div>
 
                 {/* SVG Radial Gauge */}
-                <div className="relative w-28 h-28 shrink-0 flex items-center justify-center">
-                  <svg className="w-28 h-28 -rotate-90" viewBox="0 0 112 112">
+                <div className="relative w-20 h-20 sm:w-28 sm:h-28 shrink-0 flex items-center justify-center">
+                  <svg className="w-20 h-20 sm:w-28 sm:h-28 -rotate-90" viewBox="0 0 112 112">
                     <circle
                       cx="56"
                       cy="56"
@@ -3910,21 +3959,21 @@ export default function App() {
                   </svg>
                   <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
                     <span
-                      className={`text-lg font-bold tabular-nums leading-none ${
+                      className={`text-sm sm:text-lg font-bold tabular-nums leading-none ${
                         calOver ? 'text-rose-400' : 'text-zinc-100'
                       }`}
                     >
                       {calPctRaw}%
                     </span>
-                    <span className="text-[10px] text-zinc-500 mt-1">erreicht</span>
+                    <span className="text-[9px] sm:text-[10px] text-zinc-500 mt-0.5 sm:mt-1">erreicht</span>
                   </div>
                 </div>
               </div>
 
               {/* Rechts: Makro-Fortschritt (7 Spalten) */}
-              <div className="lg:col-span-7 flex flex-col justify-between gap-4 pt-5 border-t border-zinc-800 lg:pt-0 lg:border-t-0 lg:pl-8 lg:border-l">
+              <div className="lg:col-span-7 flex flex-col justify-between gap-3 sm:gap-4 pt-3.5 sm:pt-5 border-t border-zinc-800 lg:pt-0 lg:border-t-0 lg:pl-8 lg:border-l">
                 {/* Hervorgehobener Protein-Balken */}
-                <div className="space-y-2">
+                <div className="space-y-1.5 sm:space-y-2">
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
                       <span className="text-xs font-bold uppercase tracking-wider text-emerald-400">
@@ -3951,44 +4000,47 @@ export default function App() {
                   <ProgressBar value={proPct} color="emerald" height="lg" />
                 </div>
 
-                {/* Kohlenhydrate & Fette nebeneinander */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {/* Kohlenhydrate & Fette nebeneinander (auch mobil, spart Höhe) */}
+                <div className="grid grid-cols-2 gap-3">
                   {/* Kohlenhydrate */}
-                  <div className="space-y-2">
+                  <div className="space-y-1.5">
                     <div className="flex items-center justify-between gap-1 text-xs">
-                      <span className="font-semibold text-zinc-200">Kohlenhydrate</span>
-                      <span className="tabular-nums text-zinc-300">
+                      <span className="font-semibold text-zinc-200 truncate">
+                        <span className="sm:hidden">KH</span>
+                        <span className="hidden sm:inline">Kohlenhydrate</span>
+                      </span>
+                      <span className="tabular-nums text-zinc-300 shrink-0">
                         <strong>{Math.round(totals.carbs * 10) / 10}g</strong>
-                        <span className="text-zinc-500"> / {appData.targets.carbs}g</span>
+                        <span className="text-zinc-500">/{appData.targets.carbs}</span>
                       </span>
                     </div>
                     <ProgressBar value={carbsPct} color="light" height="sm" />
-                    <div className="flex items-center justify-between text-[11px] text-zinc-500 tabular-nums">
+                    <div className="flex items-center justify-between text-[10px] sm:text-[11px] text-zinc-500 tabular-nums">
                       <span>{carbsPctRaw}%</span>
                       <span>
                         {carbsRemaining >= 0
                           ? `noch ${Math.round(carbsRemaining)}g`
-                          : `+${Math.round(Math.abs(carbsRemaining))}g drüber`}
+                          : `+${Math.round(Math.abs(carbsRemaining))}g`}
                       </span>
                     </div>
                   </div>
 
                   {/* Fette */}
-                  <div className="space-y-2">
+                  <div className="space-y-1.5">
                     <div className="flex items-center justify-between gap-1 text-xs">
                       <span className="font-semibold text-sky-400">Fette</span>
-                      <span className="tabular-nums text-zinc-300">
+                      <span className="tabular-nums text-zinc-300 shrink-0">
                         <strong>{Math.round(totals.fat * 10) / 10}g</strong>
-                        <span className="text-zinc-500"> / {appData.targets.fat}g</span>
+                        <span className="text-zinc-500">/{appData.targets.fat}</span>
                       </span>
                     </div>
                     <ProgressBar value={fatPct} color="sky" height="sm" />
-                    <div className="flex items-center justify-between text-[11px] text-zinc-500 tabular-nums">
+                    <div className="flex items-center justify-between text-[10px] sm:text-[11px] text-zinc-500 tabular-nums">
                       <span>{fatPctRaw}%</span>
                       <span>
                         {fatRemaining >= 0
                           ? `noch ${Math.round(fatRemaining)}g`
-                          : `+${Math.round(Math.abs(fatRemaining))}g drüber`}
+                          : `+${Math.round(Math.abs(fatRemaining))}g`}
                       </span>
                     </div>
                   </div>
@@ -4071,12 +4123,13 @@ export default function App() {
                     <input
                       type="text"
                       inputMode="decimal"
+                      enterKeyHint="done"
                       value={weightInput}
                       onChange={(e) => setWeightInput(e.target.value)}
                       placeholder={
                         latestWeightEntry ? formatWeightDE(latestWeightEntry.weight) : '80,0'
                       }
-                      className="w-full pl-2 pr-6 py-2 text-sm font-bold tabular-nums text-right bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-sky-500"
+                      className="w-full h-10 pl-2 pr-6 text-sm font-bold tabular-nums text-right bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-sky-500"
                     />
                     <span className="text-[10px] text-zinc-500 absolute right-1.5 top-1/2 -translate-y-1/2 pointer-events-none">
                       kg
@@ -4086,12 +4139,12 @@ export default function App() {
                     type="button"
                     onClick={() => handleStepWeight(0.1)}
                     aria-label="Gewicht um 0,1 kg erhöhen"
-                    className="w-9 h-9 rounded-xl bg-zinc-950 border border-zinc-800 text-zinc-400 hover:text-zinc-100 hover:border-zinc-700 flex items-center justify-center text-xs font-bold transition"
+                    className="w-10 h-10 rounded-xl bg-zinc-950 border border-zinc-800 text-zinc-400 hover:text-zinc-100 hover:border-zinc-700 flex items-center justify-center text-sm font-bold transition"
                   >
                     +
                   </button>
-                  <Button type="submit" variant="secondary" size="sm" className="ml-0.5 h-9">
-                    <Check className="w-3 h-3 text-sky-400" />
+                  <Button type="submit" variant="secondary" size="sm" className="ml-0.5 h-10 px-3">
+                    <Check className="w-3.5 h-3.5 text-sky-400" />
                     <span className="hidden sm:inline">OK</span>
                   </Button>
                 </div>
@@ -4105,11 +4158,11 @@ export default function App() {
               {/* LINKE SPALTE: MAHLZEITENERFASSUNG & TAGESPROTOKOLL (7 Spalten) */}
               <div
                 className={`lg:col-span-7 space-y-8 sm:space-y-10 ${
-                  mobileSection === 'habits' ? 'hidden md:block' : 'block'
+                  mobileSection === 'habits' ? 'hidden sm:block' : 'block'
                 }`}
               >
                 {/* Erfassungs-Karte */}
-                <section aria-labelledby="zone-essen" className="space-y-3">
+                <section ref={foodEntrySectionRef} aria-labelledby="zone-essen" className="space-y-3 scroll-mt-20">
                 <ZoneHeader id="zone-essen" title="Essen hinzufügen" />
                 <div className="rounded-2xl border border-zinc-800 bg-[#101114] overflow-hidden">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-2 sm:p-2.5 bg-zinc-900 border-b border-zinc-800">
@@ -4216,10 +4269,38 @@ export default function App() {
 
                       {/* Quellen-Filter & Baukasten-Trigger */}
                       <div className="flex items-center justify-between gap-2 flex-wrap">
+                        {searchQuery.trim() && !isBarcodeQuery ? (
+                          <div className="inline-flex items-center gap-1 bg-zinc-950/90 p-0.5 rounded-xl border border-zinc-800/90">
+                            {[
+                              { id: 'all', label: 'Alle' },
+                              { id: 'local', label: `Basis/BLS (${localBasisResults.length + blsResults.length})` },
+                              { id: 'off', label: `Marken (${offResults.length})`, loading: isSearchingOff },
+                            ].map((pill) => (
+                              <button
+                                key={pill.id}
+                                type="button"
+                                onClick={() => setSourceFilter(pill.id)}
+                                className={`inline-flex items-center gap-1 h-7 px-2.5 rounded-lg text-[11px] font-semibold transition ${
+                                  sourceFilter === pill.id
+                                    ? 'bg-zinc-800 text-zinc-100'
+                                    : 'text-zinc-400 hover:text-zinc-200'
+                                }`}
+                              >
+                                <span>{pill.label}</span>
+                                {pill.loading && (
+                                  <Loader2 className="w-3 h-3 animate-spin text-sky-400" />
+                                )}
+                              </button>
+                            ))}
+                          </div>
+                        ) : (
+                          <span />
+                        )}
+
                         <button
                           type="button"
                           onClick={() => setIsBuilderOpen((v) => !v)}
-                          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition ${
+                          className={`inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg text-[11px] font-semibold border transition ${
                             mealBuilderItems.length > 0 || isBuilderOpen
                               ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
                               : 'bg-zinc-950/60 text-zinc-400 border-zinc-800/80 hover:text-zinc-200'
@@ -4237,7 +4318,13 @@ export default function App() {
 
                       {/* Interaktiver Grammatur-Rechner */}
                       {selectedFood && calculatedFoodMacros && (
-                        <div className="p-4 rounded-2xl bg-zinc-950/95 border border-emerald-500/35 space-y-3.5 shadow-lg">
+                        <form
+                          onSubmit={(e) => {
+                            e.preventDefault();
+                            handleLogCalculatedFood();
+                          }}
+                          className="p-3.5 sm:p-4 rounded-2xl bg-zinc-950/95 border border-emerald-500/35 space-y-3.5 shadow-lg"
+                        >
                           <div className="flex items-start justify-between gap-2">
                             <div>
                               <div className="flex items-center gap-1.5 flex-wrap">
@@ -4287,7 +4374,7 @@ export default function App() {
                               type="button"
                               onClick={() => setSelectedFood(null)}
                               aria-label="Rechner schließen"
-                              className="p-1.5 rounded-lg text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800"
+                              className="w-9 h-9 -mr-1 -mt-1 flex items-center justify-center rounded-lg text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 shrink-0"
                             >
                               <X className="w-4 h-4" />
                             </button>
@@ -4305,7 +4392,7 @@ export default function App() {
                                       onClick={() => {
                                         if (key === amountUnit) return;
                                         if (key === 'unit') {
-                                          const g = parseFloat(gramsInput) || 0;
+                                          const g = parseDecimalInput(gramsInput);
                                           const n = g > 0 ? Math.max(0.5, Math.round((g / selectedPieceUnit.grams) * 2) / 2) : 1;
                                           setUnitCountInput(String(n));
                                         } else if (calculatedFoodMacros && calculatedFoodMacros.grams > 0) {
@@ -4313,7 +4400,7 @@ export default function App() {
                                         }
                                         setAmountUnit(key);
                                       }}
-                                      className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition ${
+                                      className={`h-8 px-2.5 rounded-md text-[11px] font-semibold transition ${
                                         amountUnit === key ? 'bg-zinc-200 text-zinc-950' : 'text-zinc-400 hover:text-zinc-100'
                                       }`}
                                     >
@@ -4337,8 +4424,8 @@ export default function App() {
                                     key={n}
                                     type="button"
                                     onClick={() => setUnitCountInput(String(n))}
-                                    className={`px-2.5 py-1 rounded-lg text-[11px] font-medium tabular-nums border transition ${
-                                      parseFloat(String(unitCountInput).replace(',', '.')) === n
+                                    className={`min-h-[34px] px-3 py-1 rounded-lg text-xs font-medium tabular-nums border transition ${
+                                      parseDecimalInput(unitCountInput) === n
                                         ? 'bg-zinc-200 text-zinc-950 border-zinc-200 font-bold'
                                         : 'bg-zinc-900 text-zinc-300 border-zinc-800 hover:border-zinc-700'
                                     }`}
@@ -4355,8 +4442,8 @@ export default function App() {
                                   onClick={() =>
                                     setGramsInput(String(selectedFood.servingQuantity))
                                   }
-                                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition ${
-                                    Number(gramsInput) === selectedFood.servingQuantity
+                                  className={`min-h-[34px] px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition ${
+                                    parseDecimalInput(gramsInput) === selectedFood.servingQuantity
                                       ? 'bg-emerald-500 text-zinc-950 border-emerald-400'
                                       : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/20'
                                   }`}
@@ -4371,8 +4458,8 @@ export default function App() {
                                   key={g}
                                   type="button"
                                   onClick={() => setGramsInput(String(g))}
-                                  className={`px-2 py-1 rounded-lg text-[11px] font-medium tabular-nums border transition ${
-                                    Number(gramsInput) === g
+                                  className={`min-h-[34px] px-2.5 py-1 rounded-lg text-[11px] font-medium tabular-nums border transition ${
+                                    parseDecimalInput(gramsInput) === g
                                       ? 'bg-zinc-200 text-zinc-950 border-zinc-200 font-bold'
                                       : 'bg-zinc-900 text-zinc-300 border-zinc-800 hover:border-zinc-700'
                                   }`}
@@ -4383,27 +4470,29 @@ export default function App() {
                             </div>
                             )}
 
-                            <div className="flex items-center gap-3">
-                              <div className="relative w-32">
+                            <div className="flex items-center gap-2.5 sm:gap-3">
+                              <div className="relative w-28 sm:w-32 shrink-0">
                                 <input
-                                  type="number"
-                                  min="0"
-                                  step={amountUnit === 'unit' && selectedPieceUnit ? '0.5' : '1'}
+                                  type="text"
+                                  inputMode="decimal"
+                                  enterKeyHint="done"
+                                  aria-label={amountUnit === 'unit' && selectedPieceUnit ? selectedPieceUnit.label : 'Menge in Gramm'}
                                   value={amountUnit === 'unit' && selectedPieceUnit ? unitCountInput : gramsInput}
+                                  onFocus={(e) => e.target.select()}
                                   onChange={(e) =>
                                     amountUnit === 'unit' && selectedPieceUnit
                                       ? setUnitCountInput(e.target.value)
                                       : setGramsInput(e.target.value)
                                   }
-                                  className="w-full pl-3 pr-16 py-2 text-sm font-bold tabular-nums bg-zinc-900 border border-zinc-700 rounded-xl text-zinc-100 focus:outline-none focus:border-emerald-500"
+                                  className="w-full h-11 pl-3 pr-12 text-sm font-bold tabular-nums bg-zinc-900 border border-zinc-700 rounded-xl text-zinc-100 focus:outline-none focus:border-emerald-500"
                                 />
-                                <span className="text-xs text-zinc-400 absolute right-3 top-1/2 -translate-y-1/2">
+                                <span className="text-xs text-zinc-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
                                   {amountUnit === 'unit' && selectedPieceUnit ? selectedPieceUnit.label : 'g'}
                                 </span>
                               </div>
 
                               {/* Live-Ergebnis */}
-                              <div className="flex-1 grid grid-cols-4 gap-1.5 text-center bg-zinc-900/90 border border-zinc-800 rounded-xl py-1.5 px-2 tabular-nums">
+                              <div className="flex-1 grid grid-cols-4 gap-1 text-center bg-zinc-900/90 border border-zinc-800 rounded-xl py-2 px-1.5 tabular-nums">
                                 <div>
                                   <div className="text-[10px] text-zinc-500">kcal</div>
                                   <div className="text-xs font-bold text-zinc-100">
@@ -4443,74 +4532,113 @@ export default function App() {
                             <div className="flex items-center gap-2">
                               <Button
                                 variant="secondary"
-                                size="sm"
+                                size="md"
                                 onClick={() => handleAddFoodToBuilder()}
+                                className="flex-1 sm:flex-initial"
                               >
                                 <Layers className="w-3.5 h-3.5 text-emerald-400" />
-                                <span>In Baukasten</span>
+                                <span>Baukasten</span>
                               </Button>
 
                               <Button
+                                type="submit"
                                 variant="primary"
-                                size="sm"
-                                onClick={handleLogCalculatedFood}
+                                size="md"
                                 disabled={calculatedFoodMacros.grams <= 0}
+                                className="flex-1 sm:flex-initial"
                               >
                                 <Plus className="w-3.5 h-3.5" />
                                 <span>Loggen</span>
                               </Button>
                             </div>
                           </div>
-                        </div>
+                        </form>
                       )}
 
-                      {/* Suchergebnisse oder Quick-Picks */}
+                      {/* Suchergebnisse oder Zuletzt geloggt + Quick-Picks */}
                       {!searchQuery.trim() ? (
-                        <div className="space-y-2">
-                          <button
-                            type="button"
-                            onClick={toggleQuickPicks}
-                            aria-expanded={showQuickPicks}
-                            className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500 hover:text-zinc-300 transition"
-                          >
-                            <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showQuickPicks ? '' : '-rotate-90'}`} />
-                            <span>Häufige Grundnahrungsmittel (1-Klick Rechner)</span>
-                          </button>
-                          {showQuickPicks && (
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                            {quickPickFoods.map((food) => (
-                              <button
-                                key={food.id}
-                                type="button"
-                                onClick={() => handleSelectFoodForCalculator(food)}
-                                className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-zinc-950/75 hover:bg-zinc-800/80 border border-zinc-800/90 hover:border-zinc-700 text-left transition group"
-                              >
-                                <div className="min-w-0">
-                                  <div className="text-xs font-semibold text-zinc-200 group-hover:text-emerald-300 truncate transition">
-                                    {food.name}
-                                  </div>
-                                  <div className="text-[11px] text-zinc-500 tabular-nums mt-0.5">
-                                    {food.calories} kcal ·{' '}
-                                    <span className="text-emerald-400">
-                                      {food.protein}g P
-                                    </span>{' '}
-                                    / 100g
-                                  </div>
-                                </div>
-                                <Plus className="w-3.5 h-3.5 text-zinc-500 group-hover:text-emerald-400 shrink-0" />
-                              </button>
-                            ))}
-                          </div>
+                        <div className="space-y-3.5">
+                          {recentLoggedMeals.length > 0 && (
+                            <div className="space-y-2">
+                              <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                                Zuletzt geloggt (1-Tap)
+                              </div>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                                {recentLoggedMeals.map((meal) => (
+                                  <button
+                                    key={meal.id}
+                                    type="button"
+                                    onClick={() => handleDuplicateMeal(meal)}
+                                    className="flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl bg-zinc-950/75 hover:bg-zinc-800/80 active:scale-[0.99] border border-zinc-800/90 hover:border-zinc-700 text-left transition group"
+                                  >
+                                    <div className="min-w-0">
+                                      <div className="text-xs font-semibold text-zinc-200 group-hover:text-emerald-300 truncate transition">
+                                        {meal.name}
+                                      </div>
+                                      <div className="text-[11px] text-zinc-500 tabular-nums mt-0.5">
+                                        {formatNumberDE(meal.calories)} kcal ·{' '}
+                                        <span className="text-emerald-400">{meal.protein}g P</span>
+                                      </div>
+                                    </div>
+                                    <Plus className="w-4 h-4 text-zinc-500 group-hover:text-emerald-400 shrink-0" />
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
                           )}
+
+                          <div className="space-y-2">
+                            <button
+                              type="button"
+                              onClick={toggleQuickPicks}
+                              aria-expanded={showQuickPicks}
+                              className="flex items-center gap-1.5 min-h-[32px] text-[11px] font-semibold uppercase tracking-wider text-zinc-500 hover:text-zinc-300 transition"
+                            >
+                              <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showQuickPicks ? '' : '-rotate-90'}`} />
+                              <span>Häufige Grundnahrungsmittel (1-Klick Rechner)</span>
+                            </button>
+                            {showQuickPicks && (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                              {quickPickFoods.map((food) => (
+                                <button
+                                  key={food.id}
+                                  type="button"
+                                  onClick={() => handleSelectFoodForCalculator(food)}
+                                  className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-zinc-950/75 hover:bg-zinc-800/80 border border-zinc-800/90 hover:border-zinc-700 text-left transition group"
+                                >
+                                  <div className="min-w-0">
+                                    <div className="text-xs font-semibold text-zinc-200 group-hover:text-emerald-300 truncate transition">
+                                      {food.name}
+                                    </div>
+                                    <div className="text-[11px] text-zinc-500 tabular-nums mt-0.5">
+                                      {food.calories} kcal ·{' '}
+                                      <span className="text-emerald-400">
+                                        {food.protein}g P
+                                      </span>{' '}
+                                      / 100g
+                                    </div>
+                                  </div>
+                                  <Plus className="w-3.5 h-3.5 text-zinc-500 group-hover:text-emerald-400 shrink-0" />
+                                </button>
+                              ))}
+                            </div>
+                            )}
+                          </div>
                         </div>
                       ) : (
                         <div className="space-y-2">
-                          {isSearchingOff && (
-                            <div className="flex items-center gap-2 text-xs text-zinc-400 py-1">
-                              <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
-                              <span>Durchsuche Open Food Facts Datenbank...</span>
-                            </div>
-                          )}
+                          {isSearchingOff &&
+                            (isBarcodeQuery ||
+                              (filteredSearchResults.length === 0 && localPersonalResults.length === 0)) && (
+                              <div className="flex items-center gap-2 text-xs text-zinc-400 py-1">
+                                <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
+                                <span>
+                                  {isBarcodeQuery
+                                    ? 'Lade Produktdaten zum Barcode...'
+                                    : 'Suche Markenprodukte bei Open Food Facts...'}
+                                </span>
+                              </div>
+                            )}
 
                           {offError && (
                             <div className="flex items-center gap-2 p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/25 text-[11px] text-amber-200">
@@ -4529,8 +4657,43 @@ export default function App() {
                             </div>
                           )}
 
-                          {filteredSearchResults.length > 0 ? (
+                          {localPersonalResults.length > 0 || filteredSearchResults.length > 0 ? (
                             <div className="max-h-72 overflow-y-auto pr-1 space-y-1.5">
+                              {localPersonalResults.map((entry) => (
+                                <button
+                                  key={entry.id}
+                                  type="button"
+                                  onClick={() => {
+                                    if (entry.kind === 'favorite') handleTapFavorite(entry.fav);
+                                    else handleTapSavedMeal(entry.meal);
+                                  }}
+                                  className="w-full flex items-center justify-between gap-2 p-2.5 rounded-xl bg-emerald-500/5 hover:bg-emerald-500/10 border border-emerald-500/25 hover:border-emerald-500/40 text-left transition"
+                                >
+                                  <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      <span className="text-xs font-semibold text-zinc-100 truncate">
+                                        {entry.name}
+                                      </span>
+                                      <Badge variant={entry.kind === 'favorite' ? 'amber' : 'emerald'}>
+                                        {entry.kind === 'favorite' ? 'Favorit' : 'Mahlzeit'}
+                                      </Badge>
+                                    </div>
+                                    <div className="text-[11px] text-zinc-400 tabular-nums mt-0.5">
+                                      {entry.calories} kcal ·{' '}
+                                      <span className="text-emerald-400 font-medium">
+                                        {entry.protein}g P
+                                      </span>{' '}
+                                      · <span className="text-amber-400">{entry.carbs}g KH</span> ·{' '}
+                                      <span className="text-sky-400">{entry.fat}g F</span>
+                                    </div>
+                                  </div>
+                                  <span className="inline-flex items-center gap-1 h-8 px-2.5 rounded-lg bg-emerald-500/15 text-emerald-300 text-[11px] font-semibold shrink-0">
+                                    <Plus className="w-3.5 h-3.5" />
+                                    1-Tap
+                                  </span>
+                                </button>
+                              ))}
+
                               {filteredSearchResults.map((food) => (
                                 <div
                                   key={food.id}
@@ -5041,75 +5204,81 @@ export default function App() {
                   {entryTab === 'manual' && (
                     <form onSubmit={handleQuickAddSubmit} className="space-y-3">
                       <div>
-                        <label className="block text-[11px] font-medium text-zinc-400 mb-1">
+                        <label htmlFor="manual-meal-name" className="block text-[11px] font-medium text-zinc-400 mb-1">
                           Bezeichnung (optional)
                         </label>
                         <input
+                          id="manual-meal-name"
                           type="text"
                           value={mealName}
                           onChange={(e) => setMealName(e.target.value)}
                           placeholder="z. B. Kantine Hähnchen-Curry"
-                          className="w-full px-3 py-2 text-xs sm:text-sm bg-zinc-950 border border-zinc-800 rounded-xl text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-emerald-500"
+                          className="w-full h-10 px-3 text-sm bg-zinc-950 border border-zinc-800 rounded-xl text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-emerald-500"
                         />
                       </div>
 
                       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                         <div>
-                          <label className="block text-[11px] font-medium text-emerald-400 mb-1">
+                          <label htmlFor="manual-protein" className="block text-[11px] font-medium text-emerald-400 mb-1">
                             Protein (g)
                           </label>
                           <input
-                            type="number"
-                            step="0.1"
-                            min="0"
+                            id="manual-protein"
+                            type="text"
+                            inputMode="decimal"
+                            enterKeyHint="next"
                             value={proteinInput}
                             onChange={(e) => setProteinInput(e.target.value)}
                             placeholder="0"
-                            className="w-full px-3 py-2 text-xs font-bold tabular-nums bg-zinc-950 border border-zinc-800 rounded-xl text-zinc-100 focus:outline-none focus:border-emerald-500"
+                            className="w-full h-10 px-3 text-sm font-bold tabular-nums bg-zinc-950 border border-zinc-800 rounded-xl text-zinc-100 focus:outline-none focus:border-emerald-500"
                           />
                         </div>
 
                         <div>
-                          <label className="block text-[11px] font-medium text-amber-400 mb-1">
+                          <label htmlFor="manual-carbs" className="block text-[11px] font-medium text-amber-400 mb-1">
                             Kohlenhydrate (g)
                           </label>
                           <input
-                            type="number"
-                            step="0.1"
-                            min="0"
+                            id="manual-carbs"
+                            type="text"
+                            inputMode="decimal"
+                            enterKeyHint="next"
                             value={carbsInput}
                             onChange={(e) => setCarbsInput(e.target.value)}
                             placeholder="0"
-                            className="w-full px-3 py-2 text-xs font-bold tabular-nums bg-zinc-950 border border-zinc-800 rounded-xl text-zinc-100 focus:outline-none focus:border-amber-500"
+                            className="w-full h-10 px-3 text-sm font-bold tabular-nums bg-zinc-950 border border-zinc-800 rounded-xl text-zinc-100 focus:outline-none focus:border-amber-500"
                           />
                         </div>
 
                         <div>
-                          <label className="block text-[11px] font-medium text-sky-400 mb-1">
+                          <label htmlFor="manual-fat" className="block text-[11px] font-medium text-sky-400 mb-1">
                             Fett (g)
                           </label>
                           <input
-                            type="number"
-                            step="0.1"
-                            min="0"
+                            id="manual-fat"
+                            type="text"
+                            inputMode="decimal"
+                            enterKeyHint="done"
                             value={fatInput}
                             onChange={(e) => setFatInput(e.target.value)}
                             placeholder="0"
-                            className="w-full px-3 py-2 text-xs font-bold tabular-nums bg-zinc-950 border border-zinc-800 rounded-xl text-zinc-100 focus:outline-none focus:border-sky-500"
+                            className="w-full h-10 px-3 text-sm font-bold tabular-nums bg-zinc-950 border border-zinc-800 rounded-xl text-zinc-100 focus:outline-none focus:border-sky-500"
                           />
                         </div>
 
                         <div>
-                          <label className="block text-[11px] font-medium text-zinc-400 mb-1">
+                          <label htmlFor="manual-kcal" className="block text-[11px] font-medium text-zinc-400 mb-1">
                             Kalorien (Auto)
                           </label>
                           <input
-                            type="number"
-                            min="0"
+                            id="manual-kcal"
+                            type="text"
+                            inputMode="numeric"
+                            enterKeyHint="done"
                             value={caloriesInput}
                             onChange={(e) => setCaloriesInput(e.target.value)}
                             placeholder={String(autoCalculatedCalories)}
-                            className="w-full px-3 py-2 text-xs font-bold tabular-nums bg-zinc-950 border border-zinc-800 rounded-xl text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-emerald-500"
+                            className="w-full h-10 px-3 text-sm font-bold tabular-nums bg-zinc-950 border border-zinc-800 rounded-xl text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-emerald-500"
                           />
                         </div>
                       </div>
@@ -5168,63 +5337,162 @@ export default function App() {
                     </div>
                   ) : (
                     <div className="divide-y divide-zinc-800/80">
-                      {dayLogs.map((item) => (
-                        <div
-                          key={item.id}
-                          className="py-2.5 first:pt-0 last:pb-0 flex items-center justify-between gap-2 group"
-                        >
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-2">
-                              <span className="text-xs sm:text-sm font-medium text-zinc-100 truncate">
-                                {item.name}
-                              </span>
-                              {item.time && (
-                                <span className="text-[10px] text-zinc-500 tabular-nums">
-                                  {item.time}
-                                </span>
-                              )}
-                            </div>
-                            <div className="text-[11px] text-zinc-400 tabular-nums mt-0.5">
-                              <span className="font-semibold text-zinc-200">
-                                {formatNumberDE(item.calories)} kcal
-                              </span>{' '}
-                              ·{' '}
-                              <span className="text-emerald-400 font-medium">
-                                {item.protein}g P
-                              </span>{' '}
-                              · <span className="text-amber-400">{item.carbs}g KH</span> ·{' '}
-                              <span className="text-sky-400">{item.fat}g F</span>
-                            </div>
-                          </div>
+                      {dayLogs.map((item) => {
+                        const isEditingThis = editingLogItem?.id === item.id;
+                        if (isEditingThis) {
+                          return (
+                            <form
+                              key={item.id}
+                              onSubmit={handleSaveEditedLog}
+                              className="py-3 first:pt-0 last:pb-0 space-y-2.5"
+                            >
+                              <input
+                                type="text"
+                                value={editingLogItem.name}
+                                onChange={(e) =>
+                                  setEditingLogItem({ ...editingLogItem, name: e.target.value })
+                                }
+                                aria-label="Bezeichnung bearbeiten"
+                                autoFocus
+                                className="w-full h-10 px-3 text-sm bg-zinc-950 border border-emerald-500/50 rounded-xl text-zinc-100 focus:outline-none focus:border-emerald-500"
+                              />
+                              <div className="grid grid-cols-4 gap-2">
+                                <div>
+                                  <label className="block text-[10px] text-zinc-400 mb-0.5">kcal</label>
+                                  <input
+                                    type="text"
+                                    inputMode="numeric"
+                                    value={editingLogItem.calories}
+                                    onChange={(e) =>
+                                      setEditingLogItem({ ...editingLogItem, calories: e.target.value })
+                                    }
+                                    className="w-full h-9 px-2 text-xs font-bold tabular-nums bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-100 focus:outline-none focus:border-emerald-500"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block text-[10px] text-emerald-400 mb-0.5">Protein</label>
+                                  <input
+                                    type="text"
+                                    inputMode="decimal"
+                                    value={editingLogItem.protein}
+                                    onChange={(e) =>
+                                      setEditingLogItem({ ...editingLogItem, protein: e.target.value })
+                                    }
+                                    className="w-full h-9 px-2 text-xs font-bold tabular-nums bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-100 focus:outline-none focus:border-emerald-500"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block text-[10px] text-amber-400 mb-0.5">KH</label>
+                                  <input
+                                    type="text"
+                                    inputMode="decimal"
+                                    value={editingLogItem.carbs}
+                                    onChange={(e) =>
+                                      setEditingLogItem({ ...editingLogItem, carbs: e.target.value })
+                                    }
+                                    className="w-full h-9 px-2 text-xs font-bold tabular-nums bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-100 focus:outline-none focus:border-amber-500"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block text-[10px] text-sky-400 mb-0.5">Fett</label>
+                                  <input
+                                    type="text"
+                                    inputMode="decimal"
+                                    value={editingLogItem.fat}
+                                    onChange={(e) =>
+                                      setEditingLogItem({ ...editingLogItem, fat: e.target.value })
+                                    }
+                                    className="w-full h-9 px-2 text-xs font-bold tabular-nums bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-100 focus:outline-none focus:border-sky-500"
+                                  />
+                                </div>
+                              </div>
+                              <div className="flex items-center justify-end gap-2">
+                                <Button variant="ghost" size="sm" onClick={() => setEditingLogItem(null)}>
+                                  Abbrechen
+                                </Button>
+                                <Button type="submit" variant="primary" size="sm">
+                                  Speichern
+                                </Button>
+                              </div>
+                            </form>
+                          );
+                        }
 
-                          <div className="flex items-center gap-1 shrink-0">
+                        return (
+                          <div
+                            key={item.id}
+                            className="py-2.5 first:pt-0 last:pb-0 flex items-center justify-between gap-2 group"
+                          >
                             <button
                               type="button"
-                              onClick={() => handlePromoteMealToFavorite(item)}
-                              title="Als Favorit speichern"
-                              className="p-1.5 rounded-lg text-zinc-500 hover:text-amber-400 hover:bg-zinc-800 transition"
+                              onClick={() =>
+                                setEditingLogItem({
+                                  id: item.id,
+                                  name: item.name,
+                                  calories: String(item.calories),
+                                  protein: String(item.protein).replace('.', ','),
+                                  carbs: String(item.carbs).replace('.', ','),
+                                  fat: String(item.fat).replace('.', ','),
+                                })
+                              }
+                              title="Tippen zum Bearbeiten"
+                              className="flex-1 min-w-0 text-left rounded-lg -mx-1 px-1 py-0.5 hover:bg-zinc-800/40 transition"
                             >
-                              <Star className="w-3.5 h-3.5" />
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs sm:text-sm font-medium text-zinc-100 truncate">
+                                  {item.name}
+                                </span>
+                                {item.time && (
+                                  <span className="text-[10px] text-zinc-500 tabular-nums shrink-0">
+                                    {item.time}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[11px] text-zinc-400 tabular-nums mt-0.5">
+                                <span className="font-semibold text-zinc-200">
+                                  {formatNumberDE(item.calories)} kcal
+                                </span>{' '}
+                                ·{' '}
+                                <span className="text-emerald-400 font-medium">
+                                  {item.protein}g P
+                                </span>{' '}
+                                · <span className="text-amber-400">{item.carbs}g KH</span> ·{' '}
+                                <span className="text-sky-400">{item.fat}g F</span>
+                              </div>
                             </button>
-                            <button
-                              type="button"
-                              onClick={() => handleDuplicateMeal(item)}
-                              title="Nochmal loggen"
-                              className="p-1.5 rounded-lg text-zinc-500 hover:text-emerald-400 hover:bg-zinc-800 transition"
-                            >
-                              <Copy className="w-3.5 h-3.5" />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleDeleteMeal(item.id)}
-                              title="Eintrag löschen"
-                              className="p-1.5 rounded-lg text-zinc-500 hover:text-rose-400 hover:bg-zinc-800 transition"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
+
+                            <div className="flex items-center gap-0.5 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => handlePromoteMealToFavorite(item)}
+                                title="Als Favorit speichern"
+                                aria-label={`${item.name} als Favorit speichern`}
+                                className="w-9 h-9 flex items-center justify-center rounded-lg text-zinc-500 hover:text-amber-400 hover:bg-zinc-800 transition"
+                              >
+                                <Star className="w-4 h-4" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDuplicateMeal(item)}
+                                title="Nochmal loggen"
+                                aria-label={`${item.name} nochmal loggen`}
+                                className="w-9 h-9 flex items-center justify-center rounded-lg text-zinc-500 hover:text-emerald-400 hover:bg-zinc-800 transition"
+                              >
+                                <Copy className="w-4 h-4" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteMeal(item.id)}
+                                title="Eintrag löschen"
+                                aria-label={`${item.name} löschen`}
+                                className="w-9 h-9 flex items-center justify-center rounded-lg text-zinc-500 hover:text-rose-400 hover:bg-zinc-800 transition"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
                           </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   )}
                 </SpotlightCard>
@@ -5234,7 +5502,7 @@ export default function App() {
               {/* RECHTE SPALTE: HABIT TRACKER & 7-TAGE-RÜCKBLICK (5 Spalten) */}
               <div
                 className={`lg:col-span-5 space-y-8 sm:space-y-10 ${
-                  mobileSection === 'food' ? 'hidden md:block' : 'block'
+                  mobileSection === 'food' ? 'hidden sm:block' : 'block'
                 }`}
               >
                 {/* Tägliche Habits */}
@@ -5300,43 +5568,53 @@ export default function App() {
                           }`}
                         >
                           <div className="flex items-center justify-between gap-2">
-                            <button
-                              type="button"
-                              onClick={() => toggleHabit(habit.id)}
-                              className="flex items-center gap-2.5 flex-1 text-left min-w-0"
-                            >
-                              <span
-                                className={`w-5 h-5 rounded-lg border flex items-center justify-center shrink-0 transition ${
-                                  isDone
-                                    ? 'bg-emerald-500 border-emerald-400 text-zinc-950'
-                                    : 'bg-zinc-900 border-zinc-700 text-transparent'
-                                }`}
+                            {editingHabits ? (
+                              <input
+                                type="text"
+                                value={habit.title}
+                                onChange={(e) => handleRenameHabit(habit.id, e.target.value)}
+                                aria-label={`Habit umbenennen: ${habit.title}`}
+                                className="flex-1 min-w-0 h-9 px-2.5 text-xs sm:text-sm bg-zinc-950 border border-zinc-700 rounded-lg text-zinc-100 focus:outline-none focus:border-emerald-500"
+                              />
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => toggleHabit(habit.id)}
+                                className="flex items-center gap-2.5 flex-1 text-left min-w-0 py-0.5"
                               >
-                                <Check className="w-3.5 h-3.5 stroke-[2.75]" />
-                              </span>
-                              <span className="min-w-0">
                                 <span
-                                  className={`block text-xs sm:text-sm font-medium truncate transition ${
-                                    isDone ? 'text-zinc-100' : 'text-zinc-300'
+                                  className={`w-6 h-6 rounded-lg border flex items-center justify-center shrink-0 transition ${
+                                    isDone
+                                      ? 'bg-emerald-500 border-emerald-400 text-zinc-950'
+                                      : 'bg-zinc-900 border-zinc-700 text-transparent'
                                   }`}
                                 >
-                                  {habit.title}
+                                  <Check className="w-3.5 h-3.5 stroke-[2.75]" />
                                 </span>
-                                {perWeek && (
+                                <span className="min-w-0">
                                   <span
-                                    className={`block text-[11px] tabular-nums ${
-                                      weekDone >= perWeek ? 'text-emerald-400' : 'text-zinc-500'
+                                    className={`block text-xs sm:text-sm font-medium truncate transition ${
+                                      isDone ? 'text-zinc-100' : 'text-zinc-300'
                                     }`}
                                   >
-                                    {Math.min(weekDone, perWeek)}/{perWeek} diese Woche
-                                    {weekDone >= perWeek ? ' · Ziel erreicht' : ''}
+                                    {habit.title}
                                   </span>
-                                )}
-                              </span>
-                            </button>
+                                  {perWeek && (
+                                    <span
+                                      className={`block text-[11px] tabular-nums ${
+                                        weekDone >= perWeek ? 'text-emerald-400' : 'text-zinc-500'
+                                      }`}
+                                    >
+                                      {Math.min(weekDone, perWeek)}/{perWeek} diese Woche
+                                      {weekDone >= perWeek ? ' · Ziel erreicht' : ''}
+                                    </span>
+                                  )}
+                                </span>
+                              </button>
+                            )}
 
                             <div className="flex items-center gap-1.5 shrink-0">
-                              {st.count > 0 && (
+                              {!editingHabits && st.count > 0 && (
                                 <span
                                   title={st.unit === 'week' ? `${st.count} Wochen in Folge` : `${st.count} Tage in Folge`}
                                   className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md bg-amber-500/15 border border-amber-500/30 text-[11px] font-bold text-amber-300 tabular-nums"
@@ -5352,7 +5630,7 @@ export default function App() {
                                   value={perWeek ?? 0}
                                   onChange={(e) => handleSetHabitFrequency(habit.id, Number(e.target.value))}
                                   aria-label={`Häufigkeit für ${habit.title}`}
-                                  className="h-8 px-2 text-[11px] bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-200 focus:outline-none focus:border-emerald-500"
+                                  className="h-9 px-2 text-[11px] bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-200 focus:outline-none focus:border-emerald-500"
                                 >
                                   {FREQUENCY_OPTIONS.map((o) => (
                                     <option key={o.value} value={o.value}>
@@ -5366,33 +5644,44 @@ export default function App() {
                                 <button
                                   type="button"
                                   onClick={() => handleDeleteHabit(habit.id)}
-                                  className="p-1 rounded-lg text-rose-400 hover:bg-rose-500/15"
+                                  aria-label={`${habit.title} löschen`}
+                                  className="w-9 h-9 flex items-center justify-center rounded-lg text-rose-400 hover:bg-rose-500/15"
                                 >
-                                  <Trash2 className="w-3.5 h-3.5" />
+                                  <Trash2 className="w-4 h-4" />
                                 </button>
                               )}
                             </div>
                           </div>
 
                           {/* 7-Tage Mini-Heatmap pro Habit */}
-                          <div className="mt-2.5 pt-2 border-t border-zinc-800/60 flex items-center justify-between gap-1">
+                          <div className="mt-2 pt-1.5 border-t border-zinc-800/60 flex items-center justify-between gap-1">
                             {heatDays.map((day) => {
                               const checkedOnDay = Boolean(
                                 (appData.habitChecksByDate[day.key] || {})[habit.id]
                               );
+                              const isCurrentDay = day.key === selectedDate;
                               return (
                                 <button
                                   key={day.key}
                                   type="button"
                                   onClick={() => toggleHabit(habit.id, day.key)}
                                   title={`${day.weekday}, ${day.dayNum}.`}
-                                  className="flex-1 flex flex-col items-center gap-1 group"
+                                  aria-label={`${habit.title} am ${day.weekday}, ${day.dayNum}. ${checkedOnDay ? 'erledigt' : 'offen'}`}
+                                  className={`flex-1 flex flex-col items-center gap-1 py-1.5 px-0.5 rounded-lg transition group ${
+                                    isCurrentDay ? 'bg-zinc-800/70' : 'hover:bg-zinc-800/40'
+                                  }`}
                                 >
-                                  <span className="text-[9px] text-zinc-500 group-hover:text-zinc-300">
+                                  <span
+                                    className={`text-[10px] leading-none ${
+                                      isCurrentDay
+                                        ? 'text-emerald-400 font-bold'
+                                        : 'text-zinc-500 group-hover:text-zinc-300'
+                                    }`}
+                                  >
                                     {day.weekday}
                                   </span>
                                   <span
-                                    className={`w-full h-1.5 rounded-full transition ${
+                                    className={`w-full h-2 rounded-full transition ${
                                       checkedOnDay
                                         ? 'bg-emerald-400'
                                         : 'bg-zinc-800 group-hover:bg-zinc-700'
@@ -5487,7 +5776,13 @@ export default function App() {
                                 onClick={() => setSelectedDate(day.key)}
                                 className="h-full flex flex-col items-center justify-end gap-1.5 group"
                               >
-                                <span className="text-[9px] text-zinc-500 tabular-nums opacity-0 group-hover:opacity-100 transition">
+                                <span
+                                  className={`text-[9px] tabular-nums transition ${
+                                    isSelected
+                                      ? 'text-emerald-300 font-bold opacity-100'
+                                      : 'text-zinc-500 opacity-0 group-hover:opacity-100'
+                                  }`}
+                                >
                                   {day.calories > 0 ? formatNumberDE(day.calories) : '–'}
                                 </span>
                                 <div className="w-full h-24 flex items-end justify-center">
@@ -5557,12 +5852,65 @@ export default function App() {
             selectedDate={selectedDate}
             dateLabel={dateHeader.badge}
             onSelectDate={setSelectedDate}
-            notify={(message) => showToast(message, null, 'emerald')}
+            notify={(message, snapshot = null, accent = 'emerald') => showToast(message, snapshot, accent)}
           />
         )}
 
         {activeView === 'weight' && (
-          <section aria-label="Gewichtsdaten Analyse" className="space-y-5">
+          <section aria-label="Gewichtsdaten Analyse" className="space-y-4 sm:space-y-5">
+            {/* Schnell-Waage direkt in der Gewichtsansicht */}
+            <form
+              onSubmit={handleSaveWeight}
+              className="flex items-center justify-between gap-2 bg-zinc-900 border border-zinc-800 rounded-2xl px-3.5 py-2.5"
+            >
+              <div className="flex items-center gap-2 min-w-0 text-xs text-zinc-400">
+                <Scale className="w-4 h-4 text-sky-400 shrink-0" />
+                <span className="font-semibold text-zinc-200 truncate">
+                  Gewicht ({dateHeader.badge})
+                </span>
+              </div>
+
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => handleStepWeight(-0.1)}
+                  aria-label="Gewicht um 0,1 kg verringern"
+                  className="w-10 h-10 rounded-xl bg-zinc-950 border border-zinc-800 text-zinc-400 hover:text-zinc-100 hover:border-zinc-700 flex items-center justify-center text-sm font-bold transition"
+                >
+                  -
+                </button>
+                <div className="relative w-24">
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    enterKeyHint="done"
+                    value={weightInput}
+                    onChange={(e) => setWeightInput(e.target.value)}
+                    placeholder={
+                      latestWeightEntry ? formatWeightDE(latestWeightEntry.weight) : '80,0'
+                    }
+                    aria-label="Gewicht in kg"
+                    className="w-full h-10 pl-2 pr-6 text-sm font-bold tabular-nums text-right bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-sky-500"
+                  />
+                  <span className="text-[10px] text-zinc-500 absolute right-1.5 top-1/2 -translate-y-1/2 pointer-events-none">
+                    kg
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleStepWeight(0.1)}
+                  aria-label="Gewicht um 0,1 kg erhöhen"
+                  className="w-10 h-10 rounded-xl bg-zinc-950 border border-zinc-800 text-zinc-400 hover:text-zinc-100 hover:border-zinc-700 flex items-center justify-center text-sm font-bold transition"
+                >
+                  +
+                </button>
+                <Button type="submit" variant="primary" size="sm" className="ml-0.5 h-10 px-3">
+                  <Check className="w-4 h-4" />
+                  <span className="hidden sm:inline">Speichern</span>
+                </Button>
+              </div>
+            </form>
+
             {/* 4 KPI-Karten */}
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
               <SpotlightCard spotlightColor="rgba(56, 189, 248, 0.1)" className="p-4">
@@ -5694,7 +6042,7 @@ export default function App() {
                   <div>
                     <h2 className="text-sm font-bold text-zinc-100">Gewichtsverlauf</h2>
                     <p className="text-xs text-zinc-400">
-                      Tageswerte (Sky) &amp; 7-Tage-Durchschnitt (Emerald)
+                      Tageswerte &amp; 7-Tage-Durchschnitt
                     </p>
                   </div>
 
@@ -5709,7 +6057,7 @@ export default function App() {
                         key={r.id}
                         type="button"
                         onClick={() => setWeightRange(r.id)}
-                        className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition ${
+                        className={`h-8 px-3 rounded-lg text-xs font-semibold transition ${
                           weightRange === r.id
                             ? 'bg-zinc-800 text-zinc-100'
                             : 'text-zinc-400 hover:text-zinc-200'
@@ -5722,13 +6070,13 @@ export default function App() {
                 </div>
 
                 {filteredChartWeights.length === 0 ? (
-                  <div className="py-16 px-4 text-center rounded-2xl bg-zinc-950/60 border border-dashed border-zinc-800 space-y-2">
+                  <div className="py-12 px-4 text-center rounded-2xl bg-zinc-950/60 border border-dashed border-zinc-800 space-y-2">
                     <Scale className="w-8 h-8 text-zinc-600 mx-auto" />
                     <p className="text-xs text-zinc-400">
                       Noch keine Gewichtsdaten vorhanden.
                     </p>
                     <p className="text-[11px] text-zinc-500">
-                      Trage oben rechts dein aktuelles Gewicht ein, um den Trend zu starten.
+                      Trage oben dein aktuelles Gewicht ein, um den Trend zu starten.
                     </p>
                   </div>
                 ) : (
@@ -5741,6 +6089,11 @@ export default function App() {
                     const padB = 34;
                     const plotW = W - padL - padR;
                     const plotH = H - padT - padB;
+
+                    const activeChartPoint =
+                      filteredChartWeights.find((d) => d.key === hoveredWeightKey) ||
+                      filteredChartWeights.find((d) => d.key === selectedDate) ||
+                      filteredChartWeights[filteredChartWeights.length - 1];
 
                     const allVals = filteredChartWeights.flatMap((d) => [
                       d.weight,
@@ -5791,6 +6144,23 @@ export default function App() {
 
                     return (
                       <div className="space-y-3">
+                        {/* Touch-freundliche Detail-Leiste für den gewählten/angetippten Tag */}
+                        {activeChartPoint && (
+                          <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-zinc-950/90 border border-zinc-800/90 text-xs tabular-nums">
+                            <span className="text-zinc-400 truncate">
+                              {activeChartPoint.fullDateLabel}
+                            </span>
+                            <div className="flex items-center gap-3 shrink-0">
+                              <span className="font-bold text-sky-300">
+                                {formatWeightDE(activeChartPoint.weight)} kg
+                              </span>
+                              <span className="text-emerald-400">
+                                Ø {formatWeightDE(activeChartPoint.movingAvg7)}
+                              </span>
+                            </div>
+                          </div>
+                        )}
+
                         <div className="w-full overflow-hidden rounded-2xl bg-zinc-950/80 border border-zinc-800/80 p-2">
                           <svg
                             viewBox={`0 0 ${W} ${H}`}
@@ -5804,8 +6174,8 @@ export default function App() {
                                 x2="0"
                                 y2="1"
                               >
-                                <stop offset="0%" stopColor="#38bdf8" stopOpacity="0.24" />
-                                <stop offset="100%" stopColor="#38bdf8" stopOpacity="0.0" />
+                                <stop offset="0%" stopColor="#6E9EF5" stopOpacity="0.24" />
+                                <stop offset="100%" stopColor="#6E9EF5" stopOpacity="0.0" />
                               </linearGradient>
                             </defs>
 
@@ -5817,14 +6187,14 @@ export default function App() {
                                   y1={tick.y}
                                   x2={W - padR}
                                   y2={tick.y}
-                                  stroke="#27272a"
+                                  stroke="#2E3037"
                                   strokeWidth="1"
                                 />
                                 <text
                                   x={padL - 8}
                                   y={tick.y + 4}
                                   textAnchor="end"
-                                  fill="#71717a"
+                                  fill="#8E929B"
                                   fontSize="11"
                                   fontFamily="ui-monospace, SFMono-Regular, monospace"
                                 >
@@ -5841,7 +6211,7 @@ export default function App() {
                                   y1={goalY}
                                   x2={W - padR}
                                   y2={goalY}
-                                  stroke="#38bdf8"
+                                  stroke="#6E9EF5"
                                   strokeOpacity="0.45"
                                   strokeWidth="1.5"
                                   strokeDasharray="5 5"
@@ -5850,7 +6220,7 @@ export default function App() {
                                   x={W - padR - 4}
                                   y={goalY - 5}
                                   textAnchor="end"
-                                  fill="#38bdf8"
+                                  fill="#8AB4FF"
                                   fontSize="10"
                                   fontWeight="600"
                                 >
@@ -5868,7 +6238,7 @@ export default function App() {
                             {filteredChartWeights.length > 1 && (
                               <polyline
                                 fill="none"
-                                stroke="#10b981"
+                                stroke="#B4E655"
                                 strokeWidth="2.25"
                                 strokeLinecap="round"
                                 strokeLinejoin="round"
@@ -5880,7 +6250,7 @@ export default function App() {
                             {filteredChartWeights.length > 1 && (
                               <polyline
                                 fill="none"
-                                stroke="#38bdf8"
+                                stroke="#6E9EF5"
                                 strokeWidth="2.5"
                                 strokeLinecap="round"
                                 strokeLinejoin="round"
@@ -5892,7 +6262,7 @@ export default function App() {
                             {filteredChartWeights.map((d, idx) => {
                               const cx = getX(idx);
                               const cy = getY(d.weight);
-                              const isHovered = hoveredWeightKey === d.key;
+                              const isActive = activeChartPoint?.key === d.key;
                               const showXLabel =
                                 filteredChartWeights.length <= 8 ||
                                 idx === 0 ||
@@ -5912,56 +6282,23 @@ export default function App() {
                                       x={cx}
                                       y={H - 10}
                                       textAnchor="middle"
-                                      fill="#71717a"
+                                      fill={isActive ? '#EDEEF0' : '#8E929B'}
                                       fontSize="10.5"
+                                      fontWeight={isActive ? '700' : '400'}
                                     >
                                       {d.shortDate}
                                     </text>
                                   )}
 
-                                  <circle cx={cx} cy={cy} r="12" fill="transparent" />
+                                  <circle cx={cx} cy={cy} r="16" fill="transparent" />
                                   <circle
                                     cx={cx}
                                     cy={cy}
-                                    r={isHovered ? '5.5' : '3.8'}
-                                    fill={isHovered ? '#f8fafc' : '#38bdf8'}
-                                    stroke="#09090b"
-                                    strokeWidth="1.75"
+                                    r={isActive ? '6' : '3.8'}
+                                    fill={isActive ? '#F7F7F8' : '#6E9EF5'}
+                                    stroke={isActive ? '#6E9EF5' : '#0B0C0E'}
+                                    strokeWidth={isActive ? '2.5' : '1.75'}
                                   />
-
-                                  {isHovered && (
-                                    <g>
-                                      <rect
-                                        x={Math.min(W - 138, Math.max(padL, cx - 64))}
-                                        y={Math.max(4, cy - 42)}
-                                        width="128"
-                                        height="32"
-                                        rx="8"
-                                        fill="#18181b"
-                                        stroke="#3f3f46"
-                                      />
-                                      <text
-                                        x={Math.min(W - 74, Math.max(padL + 64, cx))}
-                                        y={Math.max(17, cy - 28)}
-                                        textAnchor="middle"
-                                        fill="#f4f4f5"
-                                        fontSize="11"
-                                        fontWeight="700"
-                                      >
-                                        {formatWeightDE(d.weight)} kg (Ø{' '}
-                                        {formatWeightDE(d.movingAvg7)})
-                                      </text>
-                                      <text
-                                        x={Math.min(W - 74, Math.max(padL + 64, cx))}
-                                        y={Math.max(30, cy - 15)}
-                                        textAnchor="middle"
-                                        fill="#a1a1aa"
-                                        fontSize="9.5"
-                                      >
-                                        {d.shortDate}
-                                      </text>
-                                    </g>
-                                  )}
                                 </g>
                               );
                             })}
@@ -5969,7 +6306,7 @@ export default function App() {
                         </div>
 
                         {/* Legende */}
-                        <div className="flex items-center justify-between text-[11px] text-zinc-400 px-1">
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-zinc-400 px-1">
                           <div className="flex items-center gap-4">
                             <span className="inline-flex items-center gap-1.5">
                               <span className="w-2.5 h-2.5 rounded-full bg-sky-400" />
@@ -5981,7 +6318,7 @@ export default function App() {
                             </span>
                           </div>
                           <span className="text-zinc-500">
-                            Punkt anklicken zum Bearbeiten
+                            Punkt antippen zum Bearbeiten
                           </span>
                         </div>
                       </div>
@@ -6508,84 +6845,6 @@ export default function App() {
                   </div>
                 )}
               </div>
-            </div>
-          )}
-        </div>
-      </ModalDialog>
-
-      {/* ==================================================================== */}
-      {/* MODAL 2: OPENSCALE SYNC & CSV-IMPORT                                 */}
-      {/* ==================================================================== */}
-      <ModalDialog
-        open={isOpenScaleModalOpen}
-        onOpenChange={setIsOpenScaleModalOpen}
-        title="openScale Sync & Xiaomi Mi Scale"
-        description="Verbinde deine Xiaomi Mi Scale Waage über openScale vollautomatisch oder importiere CSV-Exporte."
-      >
-        <div className="p-5 space-y-4">
-          <SegmentedTabs
-            value={syncTab}
-            onValueChange={setSyncTab}
-            className="w-full"
-            items={[
-              { value: 'auto', label: 'Android Auto-Sync', icon: Smartphone },
-              { value: 'csv', label: 'CSV-Import', icon: FileSpreadsheet },
-            ]}
-          />
-
-          {syncTab === 'auto' && (
-            <div className="space-y-3 text-xs text-zinc-300 leading-relaxed">
-              <div className="font-bold text-zinc-100 flex items-center gap-1.5">
-                <Zap className="w-4 h-4 text-emerald-400" />
-                <span>Automatischer Sync via openScale &amp; MacroDroid / Tasker</span>
-              </div>
-              <p className="text-zinc-400">
-                Die Android-App <strong className="text-zinc-200">openScale</strong> empfängt das Gewicht deiner Xiaomi Mi Scale per Bluetooth. Mit einer Automatisierungs-App wie <strong className="text-zinc-200">MacroDroid</strong> kannst du einrichten, dass bei jeder neuen openScale-Benachrichtigung dein Webhook aufgerufen wird:
-              </p>
-
-              <div className="p-3 rounded-xl bg-zinc-950 border border-zinc-800 space-y-2 font-mono text-[11px] text-emerald-400 break-all select-all">
-                {openScaleWebhookUrl}
-              </div>
-
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={handleCopyOpenScaleUrl}
-                className="w-full"
-              >
-                <Link2 className="w-4 h-4" />
-                <span>{openScaleCopied ? 'Link kopiert!' : 'Sync-Link in Zwischenablage kopieren'}</span>
-              </Button>
-            </div>
-          )}
-
-          {syncTab === 'csv' && (
-            <div className="space-y-3 text-xs text-zinc-300 leading-relaxed">
-              <div className="font-bold text-zinc-100 flex items-center gap-1.5">
-                <FileSpreadsheet className="w-4 h-4 text-sky-400" />
-                <span>openScale CSV-Export importieren</span>
-              </div>
-              <p className="text-zinc-400">
-                Exportiere in openScale unter <em className="text-zinc-200">Einstellungen → Export/Import → Export als CSV</em> deine Messwerte und lade die Datei hier hoch:
-              </p>
-
-              <input
-                ref={openScaleCsvInputRef}
-                type="file"
-                accept=".csv,.txt"
-                onChange={handleImportOpenScaleCsv}
-                className="hidden"
-              />
-
-              <Button
-                variant="primary"
-                size="md"
-                onClick={() => openScaleCsvInputRef.current?.click()}
-                className="w-full"
-              >
-                <Upload className="w-4 h-4" />
-                <span>openScale CSV-Datei auswählen</span>
-              </Button>
             </div>
           )}
         </div>

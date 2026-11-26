@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import {
   AlertCircle,
   Check,
@@ -10,6 +10,7 @@ import {
   LogIn,
   RefreshCw,
   Upload,
+  X,
 } from 'lucide-react';
 import type { SyncApi } from '../sync/useSyncedAppData';
 import { DRIVE_FOLDER_NAME, SYNC_FILE_NAME } from '../sync/drive';
@@ -76,6 +77,9 @@ export function SyncHeaderButton({ sync, onOpenSettings }: { sync: SyncApi; onOp
         <Cloud className="w-3.5 h-3.5" />
       )}
       <span className="hidden lg:inline">{label}</span>
+      {sync.dirty && status !== 'syncing' && (
+        <span className="lg:hidden w-1.5 h-1.5 rounded-full bg-amber-400" aria-hidden="true" />
+      )}
     </button>
   );
 }
@@ -86,21 +90,43 @@ export function SyncHeaderButton({ sync, onOpenSettings }: { sync: SyncApi; onOp
 
 export function SyncBanner({ sync }: { sync: SyncApi }) {
   const { status } = sync;
+  const [dismissedCleanAuth, setDismissedCleanAuth] = useState(false);
+
+  // Wenn neue ungesynchte Änderungen dazukommen oder Status wechselt, Banner wieder zeigen
+  useEffect(() => {
+    if (sync.dirty || status !== 'needs-auth') setDismissedCleanAuth(false);
+  }, [sync.dirty, status]);
+
   if (status === 'needs-auth') {
+    if (!sync.dirty && dismissedCleanAuth) return null;
     return (
-      <BannerShell tone="amber">
-        <div className="min-w-0">
-          <div className="text-xs font-semibold text-amber-200">
-            {sync.dirty ? 'Änderungen noch nicht in Google Drive' : 'Google Drive Sync bereit'}
+      <BannerShell tone="amber" compact>
+        <div className="min-w-0 flex-1">
+          <div className="text-xs font-semibold text-amber-200 truncate">
+            {sync.dirty ? 'Ungesyncte Änderungen' : 'Google Drive bereit'}
           </div>
-          <div className="text-[11px] text-amber-200/70">
-            Tippe zum Anmelden – danach wird sofort synchronisiert.
+          <div className="text-[11px] text-amber-200/70 truncate">
+            {sync.dirty
+              ? 'Tippe zum Speichern in Google Drive.'
+              : 'Sitzung abgelaufen – tippe zum Abgleichen.'}
           </div>
         </div>
-        <button type="button" onClick={sync.signIn} className={`${btnPrimary} h-8 px-3 text-xs shrink-0`}>
-          <LogIn className="w-3.5 h-3.5" />
-          <span>Synchronisieren</span>
-        </button>
+        <div className="flex items-center gap-1.5 shrink-0">
+          <button type="button" onClick={sync.signIn} className={`${btnPrimary} h-8 px-3 text-xs`}>
+            <LogIn className="w-3.5 h-3.5" />
+            <span>Sync</span>
+          </button>
+          {!sync.dirty && (
+            <button
+              type="button"
+              onClick={() => setDismissedCleanAuth(true)}
+              aria-label="Hinweis ausblenden"
+              className="w-8 h-8 rounded-xl inline-flex items-center justify-center text-amber-200/70 hover:text-amber-100 hover:bg-amber-500/15 transition"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
       </BannerShell>
     );
   }
@@ -152,12 +178,24 @@ export function SyncBanner({ sync }: { sync: SyncApi }) {
   return null;
 }
 
-function BannerShell({ tone, children }: { tone: 'amber' | 'rose'; children: ReactNode }) {
+function BannerShell({
+  tone,
+  compact = false,
+  children,
+}: {
+  tone: 'amber' | 'rose';
+  compact?: boolean;
+  children: ReactNode;
+}) {
   const cls =
     tone === 'amber' ? 'bg-amber-500/10 border-amber-500/30' : 'bg-rose-500/10 border-rose-500/30';
   return (
     <div className="relative z-20 max-w-6xl mx-auto px-3 sm:px-6 pt-3">
-      <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-3 rounded-2xl border ${cls}`}>
+      <div
+        className={`flex ${
+          compact ? 'flex-row items-center' : 'flex-col sm:flex-row sm:items-center'
+        } justify-between gap-2.5 p-3 rounded-2xl border ${cls}`}
+      >
         {children}
       </div>
     </div>
@@ -252,17 +290,36 @@ export function SyncSettingsPanel({ sync }: { sync: SyncApi }) {
         </div>
       </div>
 
+      <div>
+        <label htmlFor="gdrive-login-hint" className="block text-xs font-medium text-zinc-300 mb-1">
+          Google-Konto (E-Mail für stilles Neu-Anmelden)
+        </label>
+        <input
+          id="gdrive-login-hint"
+          type="email"
+          inputMode="email"
+          autoComplete="email"
+          value={sync.loginHint}
+          onChange={(e) => sync.setLoginHint(e.target.value)}
+          placeholder="Wird nach dem Login automatisch ausgefüllt"
+          className="w-full px-3 py-2 text-xs bg-zinc-950 border border-zinc-800 rounded-xl text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-emerald-500"
+        />
+        <p className="mt-1 text-[11px] text-zinc-500">
+          Überspringt bei mehreren Google-Konten die Kontoauswahl, damit das stille Neu-Anmelden zuverlässig klappt.
+        </p>
+      </div>
+
       <label className="flex items-start gap-2.5 text-xs text-zinc-300 cursor-pointer select-none">
         <input
           type="checkbox"
           checked={sync.autoSignIn}
           onChange={(e) => sync.setAutoSignIn(e.target.checked)}
-          className="mt-0.5 accent-emerald-500"
+          className="mt-0.5 w-4 h-4 accent-emerald-500"
         />
         <span>
-          Beim Öffnen automatisch neu anmelden
+          Beim Öffnen automatisch neu anmelden (empfohlen)
           <span className="block text-[11px] text-zinc-500">
-            Ohne Tippen: Die App leitet kurz zu Google weiter, wenn die Anmeldung (1 Std.) abgelaufen ist.
+            Ohne Tippen: Erneuert die Google-Sitzung (1 Std.) per kurzem Redirect und kehrt zur aktuellen Ansicht zurück.
           </span>
         </span>
       </label>

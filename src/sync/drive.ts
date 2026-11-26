@@ -57,7 +57,10 @@ export function redirectUri(): string {
 }
 
 /** Leitet zur Google-Anmeldung weiter. `silent` versucht es ohne Rückfrage (prompt=none). */
-export function startGoogleSignIn(clientId: string, opts: { silent?: boolean } = {}): void {
+export function startGoogleSignIn(
+  clientId: string,
+  opts: { silent?: boolean; loginHint?: string } = {}
+): void {
   const state = crypto.randomUUID();
   try {
     localStorage.setItem(OAUTH_STATE_KEY, JSON.stringify({ state, silent: Boolean(opts.silent) }));
@@ -72,6 +75,7 @@ export function startGoogleSignIn(clientId: string, opts: { silent?: boolean } =
     include_granted_scopes: 'true',
     state,
   });
+  if (opts.loginHint?.trim()) params.set('login_hint', opts.loginHint.trim());
   if (opts.silent) params.set('prompt', 'none');
   window.location.assign(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
 }
@@ -136,6 +140,24 @@ export async function revokeToken(accessToken: string): Promise<void> {
     // ignorieren
   }
   clearToken();
+}
+
+/**
+ * Liest die E-Mail-Adresse des angemeldeten Google-Kontos für `login_hint`
+ * (funktioniert mit dem bestehenden `drive.file`-Zugriffsrecht).
+ */
+export async function getUserEmail(token: string): Promise<string | null> {
+  try {
+    const res = await fetch(`${API}/about?fields=user(emailAddress)`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    const email = json?.user?.emailAddress;
+    return typeof email === 'string' && email.includes('@') ? email.trim() : null;
+  } catch {
+    return null;
+  }
 }
 
 // ----------------------------------------------------------------------------

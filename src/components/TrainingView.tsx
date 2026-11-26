@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDown,
   ArrowUp,
@@ -9,6 +9,8 @@ import {
   Pencil,
   Play,
   Plus,
+  Search,
+  Timer,
   Trash2,
   Trophy,
   X,
@@ -18,6 +20,7 @@ import {
   DEFAULT_EXERCISES,
   createSession,
   doneSetCount,
+  estimateOneRepMax,
   formatSets,
   lastPerformance,
   parseNum,
@@ -42,7 +45,31 @@ interface Props {
   selectedDate: string;
   dateLabel: string;
   onSelectDate: (date: string) => void;
-  notify: (message: string) => void;
+  notify: (message: string, snapshot?: AppDataLike | null, accent?: 'emerald' | 'amber' | 'rose' | 'sky') => void;
+}
+
+const REST_STORAGE_KEY = 'hht_rest_timer_sec';
+const REST_OPTIONS = [
+  { sec: 0, label: 'Aus' },
+  { sec: 60, label: '60s' },
+  { sec: 90, label: '90s' },
+  { sec: 120, label: '2m' },
+  { sec: 180, label: '3m' },
+];
+
+function vibrate(pattern: number | number[]) {
+  try {
+    if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(pattern);
+  } catch {
+    // ignorieren
+  }
+}
+
+function formatTimer(sec: number): string {
+  const s = Math.max(0, Math.ceil(sec));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${m}:${String(r).padStart(2, '0')}`;
 }
 
 const newId = (prefix: string) =>
@@ -83,10 +110,14 @@ function NumInput({
     <input
       type="text"
       inputMode="decimal"
+      enterKeyHint="done"
       aria-label={label}
       value={text}
       placeholder={placeholder}
-      onFocus={() => setFocused(true)}
+      onFocus={(e) => {
+        setFocused(true);
+        e.target.select();
+      }}
       onChange={(e) => {
         setText(e.target.value);
         if (!/[.,]$/.test(e.target.value)) onCommit(parseNum(e.target.value));
@@ -95,7 +126,7 @@ function NumInput({
         setFocused(false);
         onCommit(parseNum(text));
       }}
-      className="w-full h-10 px-2 text-center text-sm font-bold tabular-nums bg-zinc-950 border border-zinc-800 rounded-lg text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-emerald-500"
+      className="w-full h-11 px-2 text-center text-sm font-bold tabular-nums bg-zinc-950 border border-zinc-800 rounded-xl text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-emerald-500"
     />
   );
 }
@@ -119,6 +150,70 @@ export function TrainingView({ appData, setAppData, selectedDate, dateLabel, onS
   const isOpen = (id: string) => openSessions[id] ?? id === newestId;
   const [newExerciseName, setNewExerciseName] = useState('');
   const [showLibrary, setShowLibrary] = useState(false);
+
+  // Pausentimer (Zeitstempel-basiert, damit er auch bei gesperrtem Android-Bildschirm exakt bleibt)
+  const [restPreset, setRestPreset] = useState<number>(() => {
+    try {
+      const raw = Number(localStorage.getItem(REST_STORAGE_KEY));
+      return Number.isFinite(raw) && raw >= 0 ? raw : 90;
+    } catch {
+      return 90;
+    }
+  });
+  const [restEndAt, setRestEndAt] = useState<number | null>(null);
+  const [restTotalSec, setRestTotalSec] = useState<number>(90);
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  const notifyRef = useRef(notify);
+  notifyRef.current = notify;
+
+  const updateRestPreset = (sec: number) => {
+    setRestPreset(sec);
+    try {
+      localStorage.setItem(REST_STORAGE_KEY, String(sec));
+    } catch {
+      // ignorieren
+    }
+    if (sec === 0) setRestEndAt(null);
+  };
+
+  const startRestTimer = (seconds = restPreset) => {
+    if (seconds <= 0) return;
+    const now = Date.now();
+    setNowMs(now);
+    setRestTotalSec(seconds);
+    setRestEndAt(now + seconds * 1000);
+  };
+
+  const adjustRestTimer = (deltaSec: number) => {
+    setRestEndAt((prev) => {
+      if (!prev) return null;
+      const next = Math.max(Date.now() + 1000, prev + deltaSec * 1000);
+      if (deltaSec > 0) setRestTotalSec((t) => Math.max(t, Math.ceil((next - Date.now()) / 1000)));
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    if (!restEndAt) return;
+    const tick = () => {
+      const now = Date.now();
+      setNowMs(now);
+      if (now >= restEndAt) {
+        setRestEndAt(null);
+        vibrate([120, 80, 120]);
+        notifyRef.current('Pause vorbei – nächster Satz!', null, 'emerald');
+      }
+    };
+    tick();
+    const id = window.setInterval(tick, 250);
+    return () => window.clearInterval(id);
+  }, [restEndAt]);
+
+  const restRemainingSec = restEndAt ? Math.max(0, Math.ceil((restEndAt - nowMs) / 1000)) : 0;
+  const restPct =
+    restEndAt && restTotalSec > 0
+      ? Math.max(0, Math.min(100, ((restEndAt - nowMs) / (restTotalSec * 1000)) * 100))
+      : 0;
 
   // ---------------------------------------------------------------------------
   // Daten ändern
@@ -206,8 +301,68 @@ export function TrainingView({ appData, setAppData, selectedDate, dateLabel, onS
         <ZoneHeader
           id="zone-training"
           title={`Training · ${dateLabel}`}
-          right={sessions.length > 0 ? <span>{sessions.length} {sessions.length === 1 ? 'Einheit' : 'Einheiten'}</span> : null}
+          right={
+            <div className="flex items-center gap-1.5">
+              <Timer className="w-3.5 h-3.5 text-zinc-500" />
+              <select
+                value={restPreset}
+                onChange={(e) => updateRestPreset(Number(e.target.value))}
+                aria-label="Automatischer Pausentimer nach Satz"
+                className="h-7 px-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-[11px] font-semibold text-zinc-300 focus:outline-none focus:border-emerald-500"
+              >
+                {REST_OPTIONS.map((o) => (
+                  <option key={o.sec} value={o.sec}>
+                    Pause: {o.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          }
         />
+
+        {restEndAt && (
+          <div className="sticky top-[4.5rem] z-20 rounded-2xl border border-emerald-500/40 bg-zinc-900/95 backdrop-blur-md p-3 shadow-[0_12px_32px_rgba(0,0,0,0.55)] space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <Timer className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span className="text-xs font-semibold text-zinc-300">Satzpause</span>
+                <span className="text-lg font-bold text-emerald-400 tabular-nums">
+                  {formatTimer(restRemainingSec)}
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => adjustRestTimer(-15)}
+                  className={`${btnSecondary} h-9 px-2.5 text-xs tabular-nums`}
+                >
+                  -15s
+                </button>
+                <button
+                  type="button"
+                  onClick={() => adjustRestTimer(30)}
+                  className={`${btnSecondary} h-9 px-2.5 text-xs tabular-nums`}
+                >
+                  +30s
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRestEndAt(null)}
+                  aria-label="Pausentimer stoppen"
+                  className={`${btnGhost} w-9 h-9`}
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+            <div className="w-full h-1.5 rounded-full bg-zinc-950 overflow-hidden">
+              <div
+                className="h-full bg-emerald-400 rounded-full transition-all duration-200"
+                style={{ width: `${restPct}%` }}
+              />
+            </div>
+          </div>
+        )}
 
         {sessions.map((session) => (
           <SessionCard
@@ -221,10 +376,25 @@ export function TrainingView({ appData, setAppData, selectedDate, dateLabel, onS
             onUpdateSet={updateSet}
             onUpdateExercise={updateExercise}
             onAddExercise={addExerciseToSession}
-            onRemoveExercise={(sid, uid) =>
-              updateSession(sid, (s) => ({ ...s, exercises: s.exercises.filter((e) => e.uid !== uid) }))
-            }
-            onRemoveSession={() => updateSessions((list) => list.filter((s) => s.id !== session.id))}
+            onRemoveExercise={(sid, uid, exName) => {
+              const snapshot = appData;
+              updateSession(sid, (s) => ({ ...s, exercises: s.exercises.filter((e) => e.uid !== uid) }));
+              notify(`Übung „${exName}“ entfernt`, snapshot, 'amber');
+            }}
+            onRemoveSet={(sid, uid, idx) => {
+              const snapshot = appData;
+              updateExercise(sid, uid, (e) => ({ ...e, sets: e.sets.filter((_, i) => i !== idx) }));
+              notify(`Satz ${idx + 1} entfernt`, snapshot, 'amber');
+            }}
+            onRemoveSession={() => {
+              const snapshot = appData;
+              updateSessions((list) => list.filter((s) => s.id !== session.id));
+              notify(`Training „${session.name}“ gelöscht`, snapshot, 'amber');
+            }}
+            onSetCompleted={() => {
+              vibrate(30);
+              startRestTimer();
+            }}
             onSaveAsTemplate={(name) => saveSessionAsTemplate(session, name)}
             onCreateExercise={createExercise}
           />
@@ -325,12 +495,12 @@ export function TrainingView({ appData, setAppData, selectedDate, dateLabel, onS
                 <button
                   type="button"
                   onClick={() => {
-                    if (window.confirm(`Workout „${t.name}“ löschen? Bereits geloggte Trainings bleiben erhalten.`)) {
-                      setTemplates((list) => list.filter((x) => x.id !== t.id));
-                    }
+                    const snapshot = appData;
+                    setTemplates((list) => list.filter((x) => x.id !== t.id));
+                    notify(`Workout „${t.name}“ gelöscht`, snapshot, 'amber');
                   }}
                   aria-label={`${t.name} löschen`}
-                  className={`${btnGhost} w-9 h-9 hover:text-rose-400`}
+                  className={`${btnGhost} w-10 h-10 hover:text-rose-400`}
                 >
                   <Trash2 className="w-4 h-4" />
                 </button>
@@ -426,12 +596,14 @@ export function TrainingView({ appData, setAppData, selectedDate, dateLabel, onS
                     <button
                       type="button"
                       onClick={() => {
-                        if (window.confirm(`Übung „${ex.name}“ löschen?`)) setExercises(exercises.filter((e) => e.id !== ex.id));
+                        const snapshot = appData;
+                        setExercises(exercises.filter((e) => e.id !== ex.id));
+                        notify(`Übung „${ex.name}“ gelöscht`, snapshot, 'amber');
                       }}
                       aria-label={`${ex.name} löschen`}
-                      className={`${btnGhost} w-8 h-8 hover:text-rose-400`}
+                      className={`${btnGhost} w-9 h-9 hover:text-rose-400`}
                     >
-                      <Trash2 className="w-3.5 h-3.5" />
+                      <Trash2 className="w-4 h-4" />
                     </button>
                   )}
                 </li>
@@ -459,7 +631,9 @@ function SessionCard({
   onUpdateExercise,
   onAddExercise,
   onRemoveExercise,
+  onRemoveSet,
   onRemoveSession,
+  onSetCompleted,
   onSaveAsTemplate,
   onCreateExercise,
 }: {
@@ -472,13 +646,15 @@ function SessionCard({
   onUpdateSet: (sessionId: string, uid: string, idx: number, patch: Partial<SetEntry>) => void;
   onUpdateExercise: (sessionId: string, uid: string, fn: (e: SessionExercise) => SessionExercise) => void;
   onAddExercise: (sessionId: string, exerciseId: string) => void;
-  onRemoveExercise: (sessionId: string, uid: string) => void;
+  onRemoveExercise: (sessionId: string, uid: string, name: string) => void;
+  onRemoveSet: (sessionId: string, uid: string, idx: number) => void;
   onRemoveSession: () => void;
+  onSetCompleted: () => void;
   onSaveAsTemplate: (name: string) => void;
   onCreateExercise: (name: string) => Exercise | null;
 }) {
   const [adding, setAdding] = useState(false);
-  const [newName, setNewName] = useState('');
+  const [exerciseFilter, setExerciseFilter] = useState('');
   const [savingName, setSavingName] = useState<string | null>(null);
   const done = doneSetCount(session);
   const volume = sessionVolume(session);
@@ -488,10 +664,16 @@ function SessionCard({
   const autoUid = session.exercises.find((e) => e.sets.length === 0 || e.sets.some((x) => !x.done))?.uid ?? null;
   const activeUid = openUid === undefined ? autoUid : openUid;
 
+  const filteredExercises = useMemo(() => {
+    const q = exerciseFilter.trim().toLowerCase();
+    if (!q) return exercises;
+    return exercises.filter((x) => x.name.toLowerCase().includes(q));
+  }, [exercises, exerciseFilter]);
+
 
   return (
     <article className="rounded-2xl border border-zinc-700/80 bg-zinc-900 shadow-[0_8px_24px_rgba(0,0,0,0.35)] overflow-hidden">
-      <header className={`flex items-center gap-2 pl-2 pr-4 py-2 bg-zinc-900 ${open ? 'border-b border-zinc-800' : ''}`}>
+      <header className={`flex items-center gap-2 pl-2 pr-3 py-2 bg-zinc-900 ${open ? 'border-b border-zinc-800' : ''}`}>
         <button
           type="button"
           onClick={onToggle}
@@ -515,11 +697,9 @@ function SessionCard({
         </button>
         <button
           type="button"
-          onClick={() => {
-            if (window.confirm(`Training „${session.name}“ an diesem Tag löschen?`)) onRemoveSession();
-          }}
+          onClick={onRemoveSession}
           aria-label="Training löschen"
-          className={`${btnGhost} w-9 h-9 hover:text-rose-400`}
+          className={`${btnGhost} w-10 h-10 hover:text-rose-400`}
         >
           <Trash2 className="w-4 h-4" />
         </button>
@@ -530,6 +710,12 @@ function SessionCard({
         {session.exercises.map((ex) => {
             const last = lastPerformance(workoutsByDate, ex.exerciseId, selectedDate, session.id);
             const lastText = last ? formatSets(last.sets) : '';
+            const pb = personalBest(workoutsByDate, ex.exerciseId);
+            const hasSessionPb =
+              pb !== null &&
+              ex.sets.some(
+                (s) => s.done && s.kg && s.reps && estimateOneRepMax(s.kg, s.reps) >= pb.oneRm - 0.01
+              );
             const exDone = ex.sets.filter((x) => x.done).length;
             const allDone = ex.sets.length > 0 && exDone === ex.sets.length;
             const expanded = activeUid === ex.uid;
@@ -541,16 +727,24 @@ function SessionCard({
                   type="button"
                   onClick={() => setOpenUid(ex.uid)}
                   aria-expanded={false}
-                  className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-zinc-800/50 transition"
+                  className="w-full flex items-center gap-3 px-4 py-3.5 text-left hover:bg-zinc-800/50 transition"
                 >
                   {allDone ? (
-                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
                   ) : (
-                    <span className="w-4 h-4 rounded-full border border-zinc-600 shrink-0" aria-hidden="true" />
+                    <span className="w-5 h-5 rounded-full border border-zinc-600 shrink-0" aria-hidden="true" />
                   )}
                   <span className="flex-1 min-w-0">
-                    <span className={`block text-sm font-semibold truncate ${allDone ? 'text-zinc-300' : 'text-zinc-100'}`}>
-                      {ex.name}
+                    <span className="flex items-center gap-1.5">
+                      <span className={`text-sm font-semibold truncate ${allDone ? 'text-zinc-300' : 'text-zinc-100'}`}>
+                        {ex.name}
+                      </span>
+                      {hasSessionPb && (
+                        <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-[10px] font-bold text-emerald-300 shrink-0">
+                          <Trophy className="w-3 h-3" />
+                          PR
+                        </span>
+                      )}
                     </span>
                     <span className="block text-[11px] text-zinc-500 tabular-nums truncate">
                       {exDone}/{ex.sets.length} Sätze{doneText ? ` · ${doneText}` : lastText ? ` · Letztes Mal: ${lastText}` : ''}
@@ -567,11 +761,17 @@ function SessionCard({
                     type="button"
                     onClick={() => setOpenUid(null)}
                     aria-expanded={true}
-                    className="flex-1 min-w-0 text-left"
+                    className="flex-1 min-w-0 text-left py-0.5"
                   >
                     <span className="flex items-center gap-1.5 text-sm font-semibold text-zinc-100">
-                      {ex.name}
-                      <ChevronDown className="w-4 h-4 text-zinc-500" />
+                      <span className="truncate">{ex.name}</span>
+                      {hasSessionPb && (
+                        <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-[10px] font-bold text-emerald-300 shrink-0">
+                          <Trophy className="w-3 h-3" />
+                          PR
+                        </span>
+                      )}
+                      <ChevronDown className="w-4 h-4 text-zinc-500 shrink-0" />
                     </span>
                     {lastText && (
                       <span className="block text-[11px] text-zinc-500 tabular-nums">
@@ -581,15 +781,15 @@ function SessionCard({
                   </button>
                   <button
                     type="button"
-                    onClick={() => onRemoveExercise(session.id, ex.uid)}
+                    onClick={() => onRemoveExercise(session.id, ex.uid, ex.name)}
                     aria-label={`${ex.name} entfernen`}
-                    className={`${btnGhost} w-8 h-8`}
+                    className={`${btnGhost} w-9 h-9 hover:text-rose-400 shrink-0`}
                   >
                     <X className="w-4 h-4" />
                   </button>
                 </div>
 
-                <div className="grid grid-cols-[2rem_minmax(0,1fr)_minmax(0,1fr)_2.75rem_2rem] items-center gap-2 text-[11px] text-zinc-500">
+                <div className="grid grid-cols-[1.75rem_minmax(0,1fr)_minmax(0,1fr)_3rem_2.25rem] items-center gap-2 text-[11px] text-zinc-500">
                   <span className="text-center">Satz</span>
                   <span className="text-center">kg</span>
                   <span className="text-center">Wdh.</span>
@@ -600,10 +800,16 @@ function SessionCard({
                       key={idx}
                       index={idx}
                       set={set}
-                      onChange={(patch) => onUpdateSet(session.id, ex.uid, idx, patch)}
-                      onRemove={() =>
-                        onUpdateExercise(session.id, ex.uid, (e) => ({ ...e, sets: e.sets.filter((_, i) => i !== idx) }))
-                      }
+                      onChange={(patch) => {
+                        onUpdateSet(session.id, ex.uid, idx, patch);
+                        if (patch.done === true) {
+                          onSetCompleted();
+                          // Alle Sätze dieser Übung jetzt fertig? Automatisch zur nächsten offenen Übung springen
+                          const willAllBeDone = ex.sets.every((s, i) => (i === idx ? true : s.done));
+                          if (willAllBeDone) setOpenUid(undefined);
+                        }
+                      }}
+                      onRemove={() => onRemoveSet(session.id, ex.uid, idx)}
                     />
                   ))}
                 </div>
@@ -616,10 +822,10 @@ function SessionCard({
                       return { ...e, sets: [...e.sets, { kg: prev?.kg ?? null, reps: prev?.reps ?? null, done: false }] };
                     })
                   }
-                  className={`${btnGhost} h-9 px-3 text-xs`}
+                  className={`${btnGhost} h-10 px-3 text-xs`}
                 >
                   <Plus className="w-3.5 h-3.5" />
-                  Satz
+                  Satz hinzufügen
                 </button>
               </div>
             );
@@ -628,55 +834,68 @@ function SessionCard({
 
       <footer className="flex flex-wrap items-center gap-2 px-4 py-3 border-t border-zinc-800 bg-[#101114]">
         {adding ? (
-          <div className="w-full space-y-2">
-            <label htmlFor={`add-${session.id}`} className="block text-[11px] text-zinc-400">Übung hinzufügen</label>
-            <select
-              id={`add-${session.id}`}
-              defaultValue=""
-              onChange={(e) => {
-                if (e.target.value) {
-                  onAddExercise(session.id, e.target.value);
-                  setOpenUid(undefined);
-                  setAdding(false);
-                }
-              }}
-              className={field}
-            >
-              <option value="" disabled>
-                Übung wählen …
-              </option>
-              {exercises.map((x) => (
-                <option key={x.id} value={x.id}>
-                  {x.name}
-                </option>
-              ))}
-            </select>
-            <div className="flex gap-2">
-              <input
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-                placeholder="… oder neue Übung eingeben"
-                aria-label="Neue Übung"
-                className={field}
-              />
+          <div className="w-full space-y-2.5">
+            <div className="flex items-center gap-2">
+              <div className="relative flex-1">
+                <Search className="w-4 h-4 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  autoFocus
+                  value={exerciseFilter}
+                  onChange={(e) => setExerciseFilter(e.target.value)}
+                  placeholder="Übung suchen oder neu eingeben…"
+                  aria-label="Übung suchen oder neu eingeben"
+                  className="w-full h-10 pl-9 pr-3 text-sm bg-zinc-950 border border-zinc-800 rounded-xl text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
               <button
                 type="button"
-                disabled={!newName.trim()}
                 onClick={() => {
-                  const ex = onCreateExercise(newName);
-                  if (ex) {
-                    onAddExercise(session.id, ex.id);
-                    setNewName('');
-                    setAdding(false);
-                  }
+                  setAdding(false);
+                  setExerciseFilter('');
                 }}
-                className={`${btnSecondary} h-10 px-3 text-sm shrink-0`}
+                aria-label="Abbrechen"
+                className={`${btnGhost} w-10 h-10 shrink-0`}
               >
-                Hinzufügen
-              </button>
-              <button type="button" onClick={() => setAdding(false)} aria-label="Abbrechen" className={`${btnGhost} w-10 h-10 shrink-0`}>
                 <X className="w-4 h-4" />
               </button>
+            </div>
+
+            <div className="max-h-48 overflow-y-auto rounded-xl border border-zinc-800 bg-zinc-950 divide-y divide-zinc-800/80">
+              {filteredExercises.map((x) => (
+                <button
+                  key={x.id}
+                  type="button"
+                  onClick={() => {
+                    onAddExercise(session.id, x.id);
+                    setOpenUid(undefined);
+                    setExerciseFilter('');
+                    setAdding(false);
+                  }}
+                  className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left text-sm text-zinc-200 hover:bg-zinc-800/80 transition"
+                >
+                  <span className="truncate">{x.name}</span>
+                  <Plus className="w-4 h-4 text-emerald-400 shrink-0" />
+                </button>
+              ))}
+              {exerciseFilter.trim() &&
+                !exercises.some((x) => x.name.toLowerCase() === exerciseFilter.trim().toLowerCase()) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const ex = onCreateExercise(exerciseFilter);
+                      if (ex) {
+                        onAddExercise(session.id, ex.id);
+                        setOpenUid(undefined);
+                        setExerciseFilter('');
+                        setAdding(false);
+                      }
+                    }}
+                    className="w-full flex items-center gap-2 px-3 py-2.5 text-left text-sm font-semibold text-emerald-400 hover:bg-emerald-500/10 transition"
+                  >
+                    <Plus className="w-4 h-4 shrink-0" />
+                    <span>„{exerciseFilter.trim()}“ neu anlegen &amp; hinzufügen</span>
+                  </button>
+                )}
             </div>
           </div>
         ) : savingName !== null ? (
@@ -745,7 +964,7 @@ function SetRow({
         onClick={() => onChange({ done: !set.done })}
         aria-pressed={set.done}
         aria-label={`Satz ${index + 1} erledigt`}
-        className={`h-10 rounded-lg border flex items-center justify-center transition ${
+        className={`h-11 rounded-xl border flex items-center justify-center active:scale-95 transition ${
           set.done
             ? 'bg-emerald-400 border-emerald-300 text-zinc-950'
             : 'bg-zinc-950 border-zinc-800 text-zinc-600 hover:text-zinc-300'
@@ -753,8 +972,8 @@ function SetRow({
       >
         <Check className="w-4 h-4" />
       </button>
-      <button type="button" onClick={onRemove} aria-label={`Satz ${index + 1} löschen`} className={`${btnGhost} w-8 h-8`}>
-        <X className="w-3.5 h-3.5" />
+      <button type="button" onClick={onRemove} aria-label={`Satz ${index + 1} löschen`} className={`${btnGhost} w-9 h-11 hover:text-rose-400`}>
+        <X className="w-4 h-4" />
       </button>
     </>
   );

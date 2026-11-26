@@ -35,6 +35,7 @@ import {
   startGoogleSignIn,
   consumeOAuthRedirect,
   revokeToken,
+  getUserEmail,
   ensureFolder,
   findFile,
   getVersion,
@@ -68,6 +69,7 @@ interface PersistedSyncState {
 interface SyncConfig {
   clientId: string;
   autoSignIn: boolean;
+  loginHint: string;
 }
 
 function readJson<T>(key: string): Partial<T> {
@@ -99,6 +101,8 @@ export interface UseSyncedAppDataOptions {
   /** Macht aus beliebigem JSON gültige AppData (für alte Sync-Dateien). */
   normalize: (raw: unknown) => AppData;
   notify?: (message: string, accent: Accent) => void;
+  /** Wird kurz vor einer Google-OAuth-Weiterleitung aufgerufen (z. B. um die aktuelle Ansicht zu merken). */
+  beforeRedirect?: () => void;
 }
 
 export function useSyncedAppData(opts: UseSyncedAppDataOptions) {
@@ -129,7 +133,8 @@ export function useSyncedAppData(opts: UseSyncedAppDataOptions) {
       persisted,
       config: {
         clientId: (config.clientId ?? legacy.clientId ?? '').trim(),
-        autoSignIn: config.autoSignIn ?? false,
+        autoSignIn: config.autoSignIn ?? true,
+        loginHint: (config.loginHint ?? '').trim(),
       } as SyncConfig,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -138,6 +143,7 @@ export function useSyncedAppData(opts: UseSyncedAppDataOptions) {
   const [appData, setAppData] = useState<AppData>(init.data);
   const [clientId, setClientIdState] = useState(init.config.clientId);
   const [autoSignIn, setAutoSignInState] = useState(init.config.autoSignIn);
+  const [loginHint, setLoginHintState] = useState(init.config.loginHint);
   const [status, setStatus] = useState<SyncStatus>(() =>
     !init.config.clientId ? 'off' : init.persisted.hold ? 'hold' : loadToken() ? 'synced' : 'needs-auth'
   );
@@ -157,6 +163,34 @@ export function useSyncedAppData(opts: UseSyncedAppDataOptions) {
   clientIdRef.current = clientId;
   const autoSignInRef = useRef(autoSignIn);
   autoSignInRef.current = autoSignIn;
+  const loginHintRef = useRef(loginHint);
+  loginHintRef.current = loginHint;
+
+  const saveConfig = useCallback((next: SyncConfig) => writeJson(SYNC_CONFIG_KEY, next), []);
+
+  const rememberLoginHint = useCallback(
+    (email: string) => {
+      const trimmed = email.trim();
+      setLoginHintState(trimmed);
+      loginHintRef.current = trimmed;
+      saveConfig({
+        clientId: clientIdRef.current,
+        autoSignIn: autoSignInRef.current,
+        loginHint: trimmed,
+      });
+    },
+    [saveConfig]
+  );
+
+  const ensureLoginHint = useCallback(
+    (accessToken: string) => {
+      if (loginHintRef.current) return;
+      getUserEmail(accessToken).then((email) => {
+        if (email && !loginHintRef.current) rememberLoginHint(email);
+      });
+    },
+    [rememberLoginHint]
+  );
 
   const persistSync = useCallback((patch: Partial<PersistedSyncState>) => {
     persistedRef.current = { ...persistedRef.current, ...patch };
@@ -217,6 +251,7 @@ export function useSyncedAppData(opts: UseSyncedAppDataOptions) {
 
       try {
         const accessToken = token.accessToken;
+        ensureLoginHint(accessToken);
         folderIdRef.current ||= await ensureFolder(accessToken);
         const folderId = folderIdRef.current;
 
@@ -282,7 +317,7 @@ export function useSyncedAppData(opts: UseSyncedAppDataOptions) {
         setStatus('error');
       }
     },
-    [applyLocal, persistSync]
+    [applyLocal, ensureLoginHint, persistSync]
   );
 
   const syncNow = useCallback(
@@ -305,7 +340,8 @@ export function useSyncedAppData(opts: UseSyncedAppDataOptions) {
       return;
     }
     if (silent) persistSync({ lastSilentAttempt: Date.now() });
-    startGoogleSignIn(id, { silent });
+    optsRef.current.beforeRedirect?.();
+    startGoogleSignIn(id, { silent, loginHint: loginHintRef.current });
   }, [persistSync]);
 
   /** Wird beim Öffnen bzw. bei der Rückkehr in die App aufgerufen. */
@@ -329,6 +365,8 @@ export function useSyncedAppData(opts: UseSyncedAppDataOptions) {
     const result = consumeOAuthRedirect();
     if (result.kind === 'token') {
       setHasToken(true);
+      persistSync({ lastSilentAttempt: 0 });
+      ensureLoginHint(result.token.accessToken);
       // Nach Reset/Import erst die Entscheidung im Banner abwarten
       if (persistedRef.current.hold) setStatus('hold');
       else syncNow('open');
@@ -373,31 +411,38 @@ export function useSyncedAppData(opts: UseSyncedAppDataOptions) {
   // --------------------------------------------------------------------------
   // Einstellungen & Aktionen für die UI
   // --------------------------------------------------------------------------
-  const saveConfig = (next: SyncConfig) => writeJson(SYNC_CONFIG_KEY, next);
-
   const setClientId = useCallback((value: string) => {
     setClientIdState(value);
     const trimmed = value.trim();
     clientIdRef.current = trimmed;
-    saveConfig({ clientId: trimmed, autoSignIn: autoSignInRef.current });
+    saveConfig({ clientId: trimmed, autoSignIn: autoSignInRef.current, loginHint: loginHintRef.current });
     const token = loadToken();
     setHasToken(Boolean(token));
     setStatus(!trimmed ? 'off' : persistedRef.current.hold ? 'hold' : token ? 'synced' : 'needs-auth');
-  }, []);
+  }, [saveConfig]);
 
   const setAutoSignIn = useCallback((value: boolean) => {
     setAutoSignInState(value);
-    saveConfig({ clientId: clientIdRef.current, autoSignIn: value });
-  }, []);
+    autoSignInRef.current = value;
+    saveConfig({ clientId: clientIdRef.current, autoSignIn: value, loginHint: loginHintRef.current });
+  }, [saveConfig]);
+
+  const setLoginHint = useCallback((value: string) => {
+    setLoginHintState(value);
+    const trimmed = value.trim();
+    loginHintRef.current = trimmed;
+    saveConfig({ clientId: clientIdRef.current, autoSignIn: autoSignInRef.current, loginHint: trimmed });
+  }, [saveConfig]);
 
   const disconnect = useCallback(async () => {
     const token = loadToken();
     if (token) await revokeToken(token.accessToken);
     setHasToken(false);
     folderIdRef.current = null;
+    rememberLoginHint('');
     setStatus(clientIdRef.current ? 'needs-auth' : 'off');
     optsRef.current.notify?.('Google Drive abgemeldet', 'amber');
-  }, []);
+  }, [rememberLoginHint]);
 
   /** Nach Reset/Import: Sync anhalten, bis entschieden ist, welcher Stand gilt. */
   const markHold = useCallback((reason: HoldReason) => {
@@ -426,6 +471,8 @@ export function useSyncedAppData(opts: UseSyncedAppDataOptions) {
       setClientId,
       autoSignIn,
       setAutoSignIn,
+      loginHint,
+      setLoginHint,
       redirectUri: redirectUri(),
       signIn: () => signIn(false),
       syncNow: () => syncNow('manual'),
