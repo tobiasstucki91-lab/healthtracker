@@ -16,6 +16,7 @@ import {
   X,
 } from 'lucide-react';
 import { ZoneHeader } from './ZoneHeader';
+import { useUi } from '../ui/UiContext';
 import {
   DEFAULT_EXERCISES,
   createSession,
@@ -75,7 +76,7 @@ function formatTimer(sec: number): string {
 const newId = (prefix: string) =>
   `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 
-const card = 'rounded-2xl bg-zinc-900 border border-zinc-800';
+const card = 'ui-card rounded-2xl';
 const btn =
   'inline-flex items-center justify-center gap-1.5 rounded-xl font-semibold transition active:scale-[0.98] disabled:opacity-40 disabled:pointer-events-none';
 const btnPrimary = `${btn} bg-emerald-400 text-zinc-950 hover:bg-emerald-300`;
@@ -132,6 +133,7 @@ function NumInput({
 }
 
 export function TrainingView({ appData, setAppData, selectedDate, dateLabel, onSelectDate, notify }: Props) {
+  const { uiVariant } = useUi();
   const exercises: Exercise[] =
     Array.isArray(appData.exercises) && appData.exercises.length > 0 ? appData.exercises : DEFAULT_EXERCISES;
   const templates: WorkoutTemplate[] = Array.isArray(appData.workoutTemplates) ? appData.workoutTemplates : [];
@@ -293,7 +295,7 @@ export function TrainingView({ appData, setAppData, selectedDate, dateLabel, onS
   const history = recentSessions(workoutsByDate, 8);
 
   return (
-    <div className="space-y-8 sm:space-y-10 max-w-3xl">
+    <div className={uiVariant === 'kinetic' ? 'space-y-8 sm:space-y-10 max-w-4xl' : 'space-y-8 sm:space-y-10 max-w-4xl mx-auto'}>
       {/* ================================================================ */}
       {/* TRAINING AM GEWÄHLTEN TAG                                       */}
       {/* ================================================================ */}
@@ -672,7 +674,7 @@ function SessionCard({
 
 
   return (
-    <article className="rounded-2xl border border-zinc-700/80 bg-zinc-900 shadow-[0_8px_24px_rgba(0,0,0,0.35)] overflow-hidden">
+    <article className="ui-card rounded-2xl overflow-hidden">
       <header className={`flex items-center gap-2 pl-2 pr-3 py-2 bg-zinc-900 ${open ? 'border-b border-zinc-800' : ''}`}>
         <button
           type="button"
@@ -832,7 +834,7 @@ function SessionCard({
           })}
       </div>
 
-      <footer className="flex flex-wrap items-center gap-2 px-4 py-3 border-t border-zinc-800 bg-[#101114]">
+      <footer className="flex flex-wrap items-center gap-2 px-4 py-3 border-t border-zinc-800 bg-zinc-950/60">
         {adding ? (
           <div className="w-full space-y-2.5">
             <div className="flex items-center gap-2">

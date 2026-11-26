@@ -66,9 +66,13 @@ import {
   Dumbbell,
 } from 'lucide-react';
 import { useSyncedAppData } from './sync/useSyncedAppData';
-import { SyncBanner, SyncHeaderButton, SyncSettingsPanel } from './components/SyncUi';
+import { SyncSettingsPanel } from './components/SyncUi';
 import { ZoneHeader } from './components/ZoneHeader';
 import { TrainingView } from './components/TrainingView';
+import { useUi } from './ui/UiContext';
+import { UI_THEME_META } from './ui/themes';
+import { AppShell } from './components/ui/AppShell';
+import { DailySummaryCard } from './components/ui/DailySummaryCard';
 import { DEFAULT_EXERCISES } from './training/model';
 import {
   isSatisfied as isHabitSatisfied,
@@ -524,7 +528,7 @@ function SpotlightCard({
 }) {
   return (
     <div
-      className={`relative overflow-hidden rounded-2xl bg-zinc-900 border border-zinc-800 ${className}`}
+      className={`relative overflow-hidden rounded-2xl ui-card ${className}`}
       {...props}
     >
       {children}
@@ -1893,6 +1897,8 @@ function consumeOAuthReturnView() {
 }
 
 export default function App() {
+  const { uiVariant } = useUi();
+  const chartColors = UI_THEME_META[uiVariant].chart;
   const restoredNav = useMemo(() => consumeOAuthReturnView(), []);
   const notifyRef = useRef(null);
   const navStateRef = useRef(null);
@@ -3737,11 +3743,6 @@ export default function App() {
   const fatPctRaw = Math.round((totals.fat / Math.max(1, appData.targets.fat)) * 100);
   const fatPct = Math.min(100, fatPctRaw);
 
-  // SVG Radial-Gauge Geometrie
-  const ringRadius = 48;
-  const ringCircumference = 2 * Math.PI * ringRadius;
-  const ringStrokeDashoffset = ringCircumference - (calPct / 100) * ringCircumference;
-
   // Nutri-Score Badge Varianten
   const nutriScoreVariant = {
     A: 'emerald',
@@ -3752,251 +3753,44 @@ export default function App() {
   };
 
   return (
-    <div className="relative min-h-screen bg-zinc-950 text-zinc-100 font-sans antialiased selection:bg-emerald-500/30 selection:text-emerald-200 pb-36 sm:pb-24 lg:pl-60">
-      {/* ==================================================================== */}
-      {/* SEITENLEISTE (nur PC, ab lg)                                         */}
-      {/* ==================================================================== */}
-      <aside className="hidden lg:flex fixed inset-y-0 left-0 z-40 w-60 flex-col gap-8 px-5 py-8 border-r border-zinc-800/70 bg-zinc-950">
-        <div className="flex items-center gap-2.5 px-2">
-          <img src={`${import.meta.env.BASE_URL}icon.svg?v=2`} alt="" className="w-7 h-7 rounded-[9px]" />
-          <span className="text-[15px] font-semibold tracking-tight">Health Tracker</span>
-        </div>
-
-        <nav aria-label="Hauptnavigation" className="flex flex-col gap-1">
-          {[
-            {
-              key: 'daily',
-              label: 'Kalorien & Habits',
-              icon: House,
-              active: activeView === 'daily',
-              onClick: () => setActiveView('daily'),
-            },
-            {
-              key: 'training',
-              label: 'Training',
-              icon: Dumbbell,
-              active: activeView === 'training',
-              onClick: () => setActiveView('training'),
-            },
-            {
-              key: 'weight',
-              label: 'Gewicht',
-              icon: TrendingUp,
-              active: activeView === 'weight',
-              onClick: () => setActiveView('weight'),
-            },
-            {
-              key: 'scan',
-              label: 'Barcode scannen',
-              icon: ScanBarcode,
-              active: false,
-              onClick: () => setIsScannerOpen(true),
-            },
-            {
-              key: 'goals',
-              label: 'Ziele & Backup',
-              icon: Target,
-              active: false,
-              onClick: () => setIsSettingsOpen(true),
-            },
-          ].map((item) => {
-            const Icon = item.icon;
-            return (
-              <button
-                key={item.key}
-                type="button"
-                onClick={item.onClick}
-                aria-current={item.active ? 'page' : undefined}
-                className={`h-11 px-3 rounded-xl flex items-center gap-3 text-sm font-medium text-left transition ${
-                  item.active
-                    ? 'bg-zinc-900 text-zinc-100'
-                    : 'text-zinc-400 hover:text-zinc-100 hover:bg-zinc-900/60'
-                }`}
-              >
-                <Icon
-                  className={`w-[18px] h-[18px] shrink-0 ${item.active ? 'text-emerald-400' : ''}`}
-                  strokeWidth={1.8}
-                />
-                {item.label}
-              </button>
-            );
-          })}
-        </nav>
-
-        <div className="mt-auto px-2 text-[11px] leading-relaxed text-zinc-500">
-          Lebensmittel: Bundeslebensmittelschlüssel 4.0 (Max Rubner-Institut, CC BY 4.0) &amp; Open Food Facts (ODbL)
-        </div>
-      </aside>
-
-      {/* ==================================================================== */}
-      {/* KOMPAKTER STICKY HEADER & DATUMS-NAVIGATION                          */}
-      {/* ==================================================================== */}
-      <header className="sticky top-0 z-30 bg-zinc-950/80 backdrop-blur-xl border-b border-zinc-800/80">
-        <div className="max-w-6xl mx-auto px-3 sm:px-6 h-16 flex items-center justify-between gap-2">
-          {/* App-Branding (Handy: ausgeblendet, PC: steht in der Seitenleiste) */}
-          <div className="hidden sm:flex lg:hidden items-center gap-2.5 shrink-0">
-            <img src={`${import.meta.env.BASE_URL}icon.svg?v=2`} alt="" className="w-8 h-8 rounded-[10px]" />
-            <div className="hidden sm:block">
-              <div className="flex items-center gap-1.5">
-                <span className="text-sm font-bold tracking-tight text-zinc-100 leading-none">
-                  Health <span className="text-emerald-400">&amp;</span> Habit Tracker
-                </span>
-              </div>
-              <div className="text-[11px] text-zinc-500 mt-0.5">
-                BLS & Open Food Facts
-              </div>
-            </div>
-          </div>
-
-          {/* Datums-Stepper (< Gestern | Heute + nativer Picker | Morgen >) */}
-          <div className="flex items-center gap-1.5 min-w-0">
-            <div className="flex items-center bg-zinc-900/90 border border-zinc-800 rounded-xl p-0.5 sm:p-1 shadow-inner min-w-0">
-              <button
-                type="button"
-                onClick={() => setSelectedDate((d) => addDays(d, -1))}
-                aria-label="Vorheriger Tag"
-                className="w-9 h-9 sm:w-auto sm:h-auto sm:p-2 flex items-center justify-center rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 active:scale-95 transition shrink-0"
-              >
-                <ChevronLeft className="w-4 h-4" />
-              </button>
-
-              <div className="relative flex items-center group rounded-lg hover:bg-zinc-800/80 transition min-w-0">
-                <div
-                  aria-hidden="true"
-                  className="px-1.5 sm:px-3 py-1 flex items-center gap-1.5 sm:gap-2 text-left pointer-events-none"
-                >
-                  <div className="text-center min-w-[78px] sm:min-w-[126px]">
-                    <div className="text-xs sm:text-sm font-semibold text-zinc-100 leading-tight truncate">
-                      {dateHeader.badge}
-                    </div>
-                    <div className="text-[10px] sm:text-[11px] text-zinc-400 leading-tight truncate">
-                      {dateHeader.sub}
-                    </div>
-                  </div>
-                  <Calendar className="w-3.5 h-3.5 text-zinc-500 group-hover:text-emerald-400 transition shrink-0 hidden min-[370px]:block" />
-                </div>
-
-                <input
-                  type="date"
-                  value={selectedDate}
-                  onChange={(e) => {
-                    if (e.target.value) setSelectedDate(e.target.value);
-                  }}
-                  aria-label="Datum auswählen"
-                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                />
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setSelectedDate((d) => addDays(d, 1))}
-                aria-label="Nächster Tag"
-                className="w-9 h-9 sm:w-auto sm:h-auto sm:p-2 flex items-center justify-center rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 active:scale-95 transition shrink-0"
-              >
-                <ChevronRight className="w-4 h-4" />
-              </button>
-            </div>
-
-            {selectedDate !== todayKey && (
-              <Button
-                variant="outline"
-                size="xs"
-                onClick={() => setSelectedDate(todayKey)}
-                className="border-emerald-500/30 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 h-9 sm:h-7 px-2 sm:px-2.5 shrink-0"
-              >
-                Heute
-              </Button>
-            )}
-          </div>
-
-          {/* Rechte Header-Aktionen: Google Drive Status, Gestern übernehmen & Ziele & Backup */}
-          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-            <SyncHeaderButton
-              sync={sync}
-              onOpenSettings={() => {
-                setSettingsTab('gdrive');
-                setIsSettingsOpen(true);
-              }}
-            />
-
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleCopyYesterday}
-              disabled={yesterdayLogs.length === 0}
-              title={
-                yesterdayLogs.length > 0
-                  ? `${yesterdayLogs.length} Mahlzeiten von gestern übernehmen`
-                  : 'Keine Einträge von gestern vorhanden'
-              }
-              className="hidden md:inline-flex"
-            >
-              <Copy className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Gestern übernehmen</span>
-              {yesterdayLogs.length > 0 && (
-                <span className="px-1.5 py-0.2 rounded bg-zinc-800 text-[10px] font-bold tabular-nums text-zinc-300">
-                  {yesterdayLogs.length}
-                </span>
-              )}
-            </Button>
-
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => setIsSettingsOpen(true)}
-              aria-label="Ziele & Backup öffnen"
-              className="inline-flex lg:hidden"
-            >
-              <Settings className="w-3.5 h-3.5 text-zinc-300" />
-              <span className="hidden sm:inline">Ziele & Backup</span>
-            </Button>
-          </div>
-        </div>
-      </header>
-
-      <SyncBanner sync={sync} />
-
-      {/* ==================================================================== */}
-      {/* HAUPTBEREICH (BENTO-DASHBOARD, LOGGING & HABIT TRACKER)              */}
-      {/* ==================================================================== */}
-      <main className="relative z-10 max-w-6xl mx-auto px-3 sm:px-6 pt-1 sm:pt-6 space-y-5">
-        {/* Obere Navigationsleiste: Hauptansicht & 1-Klick Schnell-Waage */}
-        <div className="hidden sm:flex lg:hidden items-center gap-2.5">
-          <SegmentedTabs
-            value={activeView}
-            onValueChange={setActiveView}
-            className="hidden sm:inline-flex lg:hidden sm:w-auto"
-            items={[
-              {
-                value: 'daily',
-                label: 'Kalorien & Habits',
-                icon: Utensils,
-                activeIconClass: 'text-emerald-400',
-              },
-              {
-                value: 'training',
-                label: 'Training',
-                icon: Dumbbell,
-                activeIconClass: 'text-emerald-400',
-              },
-              {
-                value: 'weight',
-                label: 'Gewichtsdaten',
-                icon: Scale,
-                activeIconClass: 'text-sky-400',
-              },
-            ]}
-          />
-
-        </div>
-
+    <>
+      <AppShell
+        activeView={activeView}
+        setActiveView={setActiveView}
+        mobileSection={mobileSection}
+        setMobileSection={setMobileSection}
+        selectedDate={selectedDate}
+        todayKey={todayKey}
+        setSelectedDate={setSelectedDate}
+        addDays={addDays}
+        dateHeader={dateHeader}
+        sync={sync}
+        yesterdayLogsCount={yesterdayLogs.length}
+        onCopyYesterday={handleCopyYesterday}
+        onOpenScanner={() => setIsScannerOpen(true)}
+        onOpenSettings={(tab = 'targets') => {
+          setSettingsTab(tab);
+          setIsSettingsOpen(true);
+        }}
+        todaySummary={{
+          calories: totals.calories,
+          targetCalories: appData.targets.calories,
+          calPct: calPctRaw,
+          calOver,
+          protein: totals.protein,
+          targetProtein: appData.targets.protein,
+          habitsDone: completedHabitsCount,
+          habitsTotal: appData.habits.length,
+        }}
+        formatNumberDE={formatNumberDE}
+      >
         {/* ================================================================== */}
         {/* ANSICHT A: KALORIEN, MAKROS & HABITS                               */}
         {/* ================================================================== */}
         {activeView === 'daily' && (
           <div className="flex flex-col gap-8 sm:gap-10">
             {/* ============================================================== */}
-            {/* BENTO-DASHBOARD: KALORIEN-GAUGE & MAKRO-BALKEN                 */}
+            {/* BENTO-DASHBOARD: TAGESBILANZ (3 UI-VARIANTEN)                  */}
             {/* ============================================================== */}
             <section
               aria-labelledby="zone-bilanz"
@@ -4007,160 +3801,25 @@ export default function App() {
                 title="Tagesbilanz"
                 right={<span>Ziel {formatNumberDE(appData.targets.calories)} kcal</span>}
               />
-              <div className="rounded-2xl bg-zinc-900 border border-zinc-700/80 shadow-[0_8px_24px_rgba(0,0,0,0.35)] p-3.5 sm:p-6 grid grid-cols-1 lg:grid-cols-12 gap-3.5 sm:gap-5 lg:gap-8 items-center">
-              {/* Links: Kalorien Radial-Gauge (5 Spalten) */}
-              <div className="lg:col-span-5 flex items-center justify-between gap-3 sm:gap-4">
-                <div className="space-y-1.5 sm:space-y-2.5 min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400">
-                      Kalorien-Budget
-                    </span>
-                    <Badge variant={calStatusBadge.variant}>{calStatusBadge.label}</Badge>
-                  </div>
-
-                  <div className="flex items-baseline gap-1.5">
-                    <span className="text-2xl sm:text-4xl font-bold tracking-tight text-zinc-50 tabular-nums">
-                      {formatNumberDE(totals.calories)}
-                    </span>
-                    <span className="text-xs sm:text-sm text-zinc-400 tabular-nums">
-                      / {formatNumberDE(appData.targets.calories)} kcal
-                    </span>
-                  </div>
-
-                  <div className="text-xs text-zinc-400 tabular-nums">
-                    {calOver ? (
-                      <span className="text-rose-400 font-medium">
-                        {formatNumberDE(Math.abs(calRemaining))} kcal über Tagesziel
-                      </span>
-                    ) : (
-                      <span>
-                        Noch{' '}
-                        <strong className="text-zinc-200 font-semibold">
-                          {formatNumberDE(calRemaining)} kcal
-                        </strong>{' '}
-                        offen
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                {/* SVG Radial Gauge */}
-                <div className="relative w-20 h-20 sm:w-28 sm:h-28 shrink-0 flex items-center justify-center">
-                  <svg className="w-20 h-20 sm:w-28 sm:h-28 -rotate-90" viewBox="0 0 112 112">
-                    <circle
-                      cx="56"
-                      cy="56"
-                      r={ringRadius}
-                      fill="transparent"
-                      stroke="currentColor"
-                      strokeWidth="9"
-                      className="text-zinc-800/90"
-                    />
-                    <circle
-                      cx="56"
-                      cy="56"
-                      r={ringRadius}
-                      fill="transparent"
-                      stroke="currentColor"
-                      strokeWidth="9"
-                      strokeLinecap="round"
-                      strokeDasharray={ringCircumference}
-                      strokeDashoffset={ringStrokeDashoffset}
-                      className={`transition-all duration-500 ease-out ${
-                        calOver ? 'text-rose-500' : 'text-emerald-400'
-                      }`}
-                    />
-                  </svg>
-                  <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
-                    <span
-                      className={`text-sm sm:text-lg font-bold tabular-nums leading-none ${
-                        calOver ? 'text-rose-400' : 'text-zinc-100'
-                      }`}
-                    >
-                      {calPctRaw}%
-                    </span>
-                    <span className="text-[9px] sm:text-[10px] text-zinc-500 mt-0.5 sm:mt-1">erreicht</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Rechts: Makro-Fortschritt (7 Spalten) */}
-              <div className="lg:col-span-7 flex flex-col justify-between gap-3 sm:gap-4 pt-3.5 sm:pt-5 border-t border-zinc-800 lg:pt-0 lg:border-t-0 lg:pl-8 lg:border-l">
-                {/* Hervorgehobener Protein-Balken */}
-                <div className="space-y-1.5 sm:space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-bold uppercase tracking-wider text-emerald-400">
-                        Protein
-                      </span>
-                      {proGoalHit ? (
-                        <Badge variant="emerald">
-                          <Check className="w-3 h-3" /> Ziel erreicht
-                        </Badge>
-                      ) : (
-                        <span className="text-[11px] text-zinc-400 tabular-nums">
-                          noch {Math.max(0, Math.round(proRemaining))}g offen
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="text-xs sm:text-sm tabular-nums">
-                      <span className="font-bold text-zinc-100">
-                        {Math.round(totals.protein * 10) / 10}g
-                      </span>
-                      <span className="text-zinc-500"> / {appData.targets.protein}g</span>
-                    </div>
-                  </div>
-                  <ProgressBar value={proPct} color="emerald" height="lg" />
-                </div>
-
-                {/* Kohlenhydrate & Fette nebeneinander (auch mobil, spart Höhe) */}
-                <div className="grid grid-cols-2 gap-3">
-                  {/* Kohlenhydrate */}
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between gap-1 text-xs">
-                      <span className="font-semibold text-zinc-200 truncate">
-                        <span className="sm:hidden">KH</span>
-                        <span className="hidden sm:inline">Kohlenhydrate</span>
-                      </span>
-                      <span className="tabular-nums text-zinc-300 shrink-0">
-                        <strong>{Math.round(totals.carbs * 10) / 10}g</strong>
-                        <span className="text-zinc-500">/{appData.targets.carbs}</span>
-                      </span>
-                    </div>
-                    <ProgressBar value={carbsPct} color="light" height="sm" />
-                    <div className="flex items-center justify-between text-[10px] sm:text-[11px] text-zinc-500 tabular-nums">
-                      <span>{carbsPctRaw}%</span>
-                      <span>
-                        {carbsRemaining >= 0
-                          ? `noch ${Math.round(carbsRemaining)}g`
-                          : `+${Math.round(Math.abs(carbsRemaining))}g`}
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Fette */}
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between gap-1 text-xs">
-                      <span className="font-semibold text-sky-400">Fette</span>
-                      <span className="tabular-nums text-zinc-300 shrink-0">
-                        <strong>{Math.round(totals.fat * 10) / 10}g</strong>
-                        <span className="text-zinc-500">/{appData.targets.fat}</span>
-                      </span>
-                    </div>
-                    <ProgressBar value={fatPct} color="sky" height="sm" />
-                    <div className="flex items-center justify-between text-[10px] sm:text-[11px] text-zinc-500 tabular-nums">
-                      <span>{fatPctRaw}%</span>
-                      <span>
-                        {fatRemaining >= 0
-                          ? `noch ${Math.round(fatRemaining)}g`
-                          : `+${Math.round(Math.abs(fatRemaining))}g`}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              </div>
+              <DailySummaryCard
+                totals={totals}
+                targets={appData.targets}
+                calRemaining={calRemaining}
+                calOver={calOver}
+                calPct={calPct}
+                calPctRaw={calPctRaw}
+                calStatusBadge={calStatusBadge}
+                proPct={proPct}
+                proGoalHit={proGoalHit}
+                proRemaining={proRemaining}
+                carbsPct={carbsPct}
+                carbsPctRaw={carbsPctRaw}
+                carbsRemaining={carbsRemaining}
+                fatPct={fatPct}
+                fatPctRaw={fatPctRaw}
+                fatRemaining={fatRemaining}
+                formatNumberDE={formatNumberDE}
+              />
 
               {/* Adaptives Kalorienziel: Verbrauch, Trend, Wochen-Vorschlag */}
               {energyProfile.enabled && !energyEstimate && (
@@ -4268,17 +3927,27 @@ export default function App() {
             {/* ============================================================== */}
             {/* HAUPT-ARBEITSBEREICH: ERFASSUNG & PROTOKOLL (7) | HABITS (5)   */}
             {/* ============================================================== */}
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 sm:gap-10 lg:gap-8 items-start">
-              {/* LINKE SPALTE: MAHLZEITENERFASSUNG & TAGESPROTOKOLL (7 Spalten) */}
+            <div
+              className={`grid grid-cols-1 lg:grid-cols-12 items-start ${
+                uiVariant === 'kinetic'
+                  ? 'gap-6 lg:gap-5'
+                  : uiVariant === 'nocturne'
+                  ? 'gap-8 sm:gap-10 lg:gap-10'
+                  : 'gap-8 sm:gap-10 lg:gap-7'
+              }`}
+            >
+              {/* LINKE SPALTE: MAHLZEITENERFASSUNG & TAGESPROTOKOLL */}
               <div
-                className={`lg:col-span-7 space-y-8 sm:space-y-10 ${
+                className={`${
+                  uiVariant === 'kinetic' ? 'lg:col-span-8' : 'lg:col-span-7'
+                } space-y-8 sm:space-y-10 ${
                   mobileSection === 'habits' ? 'hidden sm:block' : 'block'
                 }`}
               >
                 {/* Erfassungs-Karte */}
                 <section ref={foodEntrySectionRef} aria-labelledby="zone-essen" className="space-y-3 scroll-mt-20">
                 <ZoneHeader id="zone-essen" title="Essen hinzufügen" />
-                <div className="rounded-2xl border border-zinc-800 bg-[#101114] overflow-hidden">
+                <div className="ui-card rounded-2xl overflow-hidden">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-2 sm:p-2.5 bg-zinc-900 border-b border-zinc-800">
                     <SegmentedTabs
                       value={entryTab}
@@ -5717,9 +5386,11 @@ export default function App() {
                 </section>
               </div>
 
-              {/* RECHTE SPALTE: HABIT TRACKER & 7-TAGE-RÜCKBLICK (5 Spalten) */}
+              {/* RECHTE SPALTE: HABIT TRACKER & 7-TAGE-RÜCKBLICK */}
               <div
-                className={`lg:col-span-5 space-y-8 sm:space-y-10 ${
+                className={`${
+                  uiVariant === 'kinetic' ? 'lg:col-span-4' : 'lg:col-span-5'
+                } space-y-8 sm:space-y-10 ${
                   mobileSection === 'food' ? 'hidden sm:block' : 'block'
                 }`}
               >
@@ -6006,7 +5677,13 @@ export default function App() {
                                 <div className="w-full h-24 flex items-end justify-center">
                                   <div
                                     style={{ height: `${heightPct}%` }}
-                                    className={`w-full max-w-[24px] rounded-t-lg transition-all duration-300 ${
+                                    className={`w-full max-w-[24px] transition-all duration-300 ${
+                                      uiVariant === 'obsidian'
+                                        ? 'rounded-t-full'
+                                        : uiVariant === 'kinetic'
+                                        ? 'rounded-t-sm'
+                                        : 'rounded-t-md'
+                                    } ${
                                       !day.hasLogs
                                         ? 'bg-zinc-800/60'
                                         : isOverTarget
@@ -6392,8 +6069,8 @@ export default function App() {
                                 x2="0"
                                 y2="1"
                               >
-                                <stop offset="0%" stopColor="#6E9EF5" stopOpacity="0.24" />
-                                <stop offset="100%" stopColor="#6E9EF5" stopOpacity="0.0" />
+                                <stop offset="0%" stopColor={chartColors.weightArea} stopOpacity="0.24" />
+                                <stop offset="100%" stopColor={chartColors.weightArea} stopOpacity="0.0" />
                               </linearGradient>
                             </defs>
 
@@ -6405,14 +6082,14 @@ export default function App() {
                                   y1={tick.y}
                                   x2={W - padR}
                                   y2={tick.y}
-                                  stroke="#2E3037"
+                                  stroke={chartColors.grid}
                                   strokeWidth="1"
                                 />
                                 <text
                                   x={padL - 8}
                                   y={tick.y + 4}
                                   textAnchor="end"
-                                  fill="#8E929B"
+                                  fill={chartColors.axisText}
                                   fontSize="11"
                                   fontFamily="ui-monospace, SFMono-Regular, monospace"
                                 >
@@ -6429,7 +6106,7 @@ export default function App() {
                                   y1={goalY}
                                   x2={W - padR}
                                   y2={goalY}
-                                  stroke="#6E9EF5"
+                                  stroke={chartColors.goalLine}
                                   strokeOpacity="0.45"
                                   strokeWidth="1.5"
                                   strokeDasharray="5 5"
@@ -6438,7 +6115,7 @@ export default function App() {
                                   x={W - padR - 4}
                                   y={goalY - 5}
                                   textAnchor="end"
-                                  fill="#8AB4FF"
+                                  fill={chartColors.goalText}
                                   fontSize="10"
                                   fontWeight="600"
                                 >
@@ -6456,7 +6133,7 @@ export default function App() {
                             {filteredChartWeights.length > 1 && (
                               <polyline
                                 fill="none"
-                                stroke="#B4E655"
+                                stroke={chartColors.avgLine}
                                 strokeWidth="2.25"
                                 strokeLinecap="round"
                                 strokeLinejoin="round"
@@ -6468,7 +6145,7 @@ export default function App() {
                             {filteredChartWeights.length > 1 && (
                               <polyline
                                 fill="none"
-                                stroke="#6E9EF5"
+                                stroke={chartColors.weightLine}
                                 strokeWidth="2.5"
                                 strokeLinecap="round"
                                 strokeLinejoin="round"
@@ -6500,7 +6177,7 @@ export default function App() {
                                       x={cx}
                                       y={H - 10}
                                       textAnchor="middle"
-                                      fill={isActive ? '#EDEEF0' : '#8E929B'}
+                                      fill={isActive ? chartColors.activeText : chartColors.axisText}
                                       fontSize="10.5"
                                       fontWeight={isActive ? '700' : '400'}
                                     >
@@ -6513,8 +6190,8 @@ export default function App() {
                                     cx={cx}
                                     cy={cy}
                                     r={isActive ? '6' : '3.8'}
-                                    fill={isActive ? '#F7F7F8' : '#6E9EF5'}
-                                    stroke={isActive ? '#6E9EF5' : '#0B0C0E'}
+                                    fill={isActive ? chartColors.dotActiveFill : chartColors.dotFill}
+                                    stroke={isActive ? chartColors.dotFill : chartColors.dotStroke}
                                     strokeWidth={isActive ? '2.5' : '1.75'}
                                   />
                                 </g>
@@ -6614,93 +6291,7 @@ export default function App() {
             </div>
           </section>
         )}
-      </main>
-
-      {/* ==================================================================== */}
-      {/* MOBILE NAVIGATION UNTEN (nur Handy)                                  */}
-      {/* ==================================================================== */}
-      <nav
-        aria-label="Hauptnavigation"
-        className="sm:hidden fixed inset-x-4 z-40 bottom-[calc(1rem+env(safe-area-inset-bottom))] h-[68px] px-1.5 flex items-center justify-around rounded-[24px] bg-zinc-900/95 backdrop-blur-xl border border-zinc-800"
-      >
-        {[
-          {
-            key: 'today',
-            label: 'Heute',
-            icon: House,
-            active: activeView === 'daily' && mobileSection !== 'habits',
-            onClick: () => {
-              setActiveView('daily');
-              setMobileSection('all');
-              window.scrollTo({ top: 0, behavior: 'smooth' });
-            },
-          },
-          {
-            key: 'habits',
-            label: 'Habits',
-            icon: SquareCheckBig,
-            active: activeView === 'daily' && mobileSection === 'habits',
-            onClick: () => {
-              setActiveView('daily');
-              setMobileSection('habits');
-              window.scrollTo({ top: 0, behavior: 'smooth' });
-            },
-          },
-          { key: 'scan' },
-          {
-            key: 'training',
-            label: 'Training',
-            icon: Dumbbell,
-            active: activeView === 'training',
-            onClick: () => {
-              setActiveView('training');
-              window.scrollTo({ top: 0, behavior: 'smooth' });
-            },
-          },
-          {
-            key: 'weight',
-            label: 'Gewicht',
-            icon: TrendingUp,
-            active: activeView === 'weight',
-            onClick: () => {
-              setActiveView('weight');
-              window.scrollTo({ top: 0, behavior: 'smooth' });
-            },
-          },
-        ].map((item) => {
-          if (item.key === 'scan') {
-            return (
-              <button
-                key="scan"
-                type="button"
-                onClick={() => setIsScannerOpen(true)}
-                aria-label="Barcode scannen"
-                className="w-14 h-14 rounded-[18px] bg-emerald-400 text-zinc-950 flex items-center justify-center active:scale-95 transition"
-              >
-                <ScanBarcode className="w-[22px] h-[22px]" strokeWidth={2} />
-              </button>
-            );
-          }
-          const Icon = item.icon;
-          return (
-            <button
-              key={item.key}
-              type="button"
-              onClick={item.onClick}
-              aria-current={item.active ? 'page' : undefined}
-              className={`w-[60px] h-[52px] flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition ${
-                item.active ? 'text-zinc-100' : 'text-zinc-400'
-              }`}
-            >
-              <Icon
-                className={`w-5 h-5 ${item.active ? 'text-emerald-400' : ''}`}
-                strokeWidth={1.8}
-              />
-              {item.label}
-            </button>
-          );
-        })}
-      </nav>
+      </AppShell>
 
       {/* ==================================================================== */}
       {/* MODAL 1: ZIELE, GOOGLE DRIVE SYNC & DATENSICHERUNG                   */}
@@ -7205,6 +6796,6 @@ export default function App() {
           undoSnapshotRef.current = null;
         }}
       />
-    </div>
+    </>
   );
 }
