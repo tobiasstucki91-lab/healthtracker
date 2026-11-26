@@ -13,8 +13,8 @@ const AI_CACHE_MAX = 60;
 
 export const GEMINI_FALLBACK_MODELS = [
   'gemini-2.5-flash',
-  'gemini-flash-latest',
   'gemini-2.5-flash-lite',
+  'gemini-flash-latest',
 ] as const;
 
 export interface AiEstimatedFood {
@@ -280,15 +280,6 @@ export async function estimateMealWithAi(opts: EstimateMealOptions): Promise<AiE
     });
   }
 
-  const body = JSON.stringify({
-    contents: [{ role: 'user', parts }],
-    generationConfig: {
-      temperature: 0.2,
-      responseMimeType: 'application/json',
-      responseSchema: RESPONSE_SCHEMA,
-    },
-  });
-
   const preferred = opts.model?.trim();
   const models = preferred
     ? [preferred, ...GEMINI_FALLBACK_MODELS.filter((m) => m !== preferred)]
@@ -296,27 +287,42 @@ export async function estimateMealWithAi(opts: EstimateMealOptions): Promise<AiE
 
   let lastError: Error | null = null;
   for (const model of models) {
+    const generationConfig: Record<string, unknown> = {
+      temperature: 0.2,
+      maxOutputTokens: 320,
+      responseMimeType: 'application/json',
+      responseSchema: RESPONSE_SCHEMA,
+    };
+    // Gemini 2.5 denkt standardmäßig sehr lange (15-25s) – für schnelle Makro-Schätzung deaktivieren
+    if (/^gemini-2\.5-/i.test(model)) {
+      generationConfig.thinkingConfig = { thinkingBudget: 0 };
+    }
+
+    const body = JSON.stringify({
+      contents: [{ role: 'user', parts }],
+      generationConfig,
+    });
+
     const ctrl = new AbortController();
     const onAbort = () => ctrl.abort();
     opts.signal?.addEventListener('abort', onAbort, { once: true });
-    const timer = setTimeout(() => ctrl.abort(), 15000);
+    const timer = setTimeout(() => ctrl.abort(), 30000);
 
     try {
       const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`,
         {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'x-goog-api-key': key,
           },
           body,
           signal: ctrl.signal,
         }
       );
 
-      if (res.status === 404) {
-        lastError = new Error(`Modell ${model} nicht verfügbar`);
+      if (res.status === 404 || res.status === 503) {
+        lastError = new Error(`Modell ${model} gerade nicht verfügbar (${res.status})`);
         continue;
       }
       if (res.status === 400 || res.status === 401 || res.status === 403) {
@@ -328,7 +334,7 @@ export async function estimateMealWithAi(opts: EstimateMealOptions): Promise<AiE
         }
         throw new Error(
           msg && /api key/i.test(msg)
-            ? 'Gemini API-Key ungültig. Bitte unter Einstellungen → KI-Schätzung prüfen.'
+            ? 'Gemini API-Key ungültig. Bitte unter Einstellungen → KI-Suche prüfen.'
             : `Gemini-Anfrage abgelehnt (${res.status})${msg ? `: ${msg}` : ''}`
         );
       }
@@ -355,10 +361,10 @@ export async function estimateMealWithAi(opts: EstimateMealOptions): Promise<AiE
       if (opts.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
       if (err instanceof Error && err.name === 'AbortError') {
         lastError = new Error('Zeitüberschreitung bei der KI-Schätzung. Bitte erneut versuchen.');
-        break;
+        continue;
       }
       lastError = err instanceof Error ? err : new Error('KI-Schätzung fehlgeschlagen.');
-      // Nur bei 404 das nächste Modell versuchen; alle anderen Fehler sofort melden
+      // Nur bei nicht verfügbarem Modell (404/503) das nächste Modell versuchen
       if (!/nicht verfügbar/i.test(lastError.message)) break;
     } finally {
       clearTimeout(timer);
