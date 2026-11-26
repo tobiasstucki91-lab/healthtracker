@@ -4,6 +4,7 @@ import { loadBlsIndex, searchIndex as searchBlsIndex } from './foods/bls';
 import { searchDishes } from './foods/dishes';
 import {
   compressImageForAi,
+  discoverGeminiModels,
   estimateMealWithAi,
   GEMINI_FALLBACK_MODELS,
   loadGeminiApiKey,
@@ -2027,6 +2028,7 @@ export default function App() {
   const [geminiModel, setGeminiModelState] = useState(loadGeminiModel);
   const [showGeminiKey, setShowGeminiKey] = useState(false);
   const [isEstimatingAi, setIsEstimatingAi] = useState(false);
+  const [aiProgressText, setAiProgressText] = useState('');
   const [aiError, setAiError] = useState(null);
   const [aiTestStatus, setAiTestStatus] = useState(null);
   const aiPhotoInputRef = useRef(null);
@@ -2976,12 +2978,18 @@ export default function App() {
     aiAbortRef.current = ctrl;
     setIsEstimatingAi(true);
     setAiError(null);
+    setAiProgressText(file ? 'Foto wird verkleinert…' : `Schätze „${query.trim()}“…`);
 
     try {
       let imagePayload = {};
       if (file) {
-        const compressed = await compressImageForAi(file);
+        const [compressed] = await Promise.all([
+          compressImageForAi(file),
+          !geminiModel.trim() ? discoverGeminiModels(geminiApiKey, ctrl.signal).catch(() => []) : Promise.resolve([]),
+        ]);
+        if (ctrl.signal.aborted) return;
         imagePayload = { imageBase64: compressed.base64, mimeType: compressed.mimeType };
+        setAiProgressText('Analysiere Foto mit KI…');
       }
       const food = await estimateMealWithAi({
         query: query.trim(),
@@ -3000,6 +3008,7 @@ export default function App() {
     } finally {
       if (aiAbortRef.current === ctrl) {
         setIsEstimatingAi(false);
+        setAiProgressText('');
       }
     }
   };
@@ -4109,8 +4118,25 @@ export default function App() {
                               ) : (
                                 <Sparkles className="w-3.5 h-3.5" />
                               )}
-                              <span>{geminiApiKey.trim() ? 'KI Teller-Foto' : 'KI einrichten'}</span>
+                              <span>
+                                {isEstimatingAi
+                                  ? aiProgressText || 'Analysiere…'
+                                  : geminiApiKey.trim()
+                                  ? 'KI Teller-Foto'
+                                  : 'KI einrichten'}
+                              </span>
                             </button>
+                            {isEstimatingAi && (
+                              <button
+                                type="button"
+                                onClick={() => aiAbortRef.current?.abort()}
+                                aria-label="KI-Analyse abbrechen"
+                                className="inline-flex items-center gap-1 h-8 px-2.5 rounded-lg text-[11px] font-semibold bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-zinc-100 transition"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                                <span>Abbrechen</span>
+                              </button>
+                            )}
                           </div>
                         )}
 
@@ -4150,7 +4176,7 @@ export default function App() {
                               )}
                               <span className="text-xs font-semibold text-sky-200 truncate">
                                 {isEstimatingAi
-                                  ? `Schätze „${searchQuery.trim()}“ mit Gemini…`
+                                  ? aiProgressText || `Schätze „${searchQuery.trim()}“ mit Gemini…`
                                   : `„${searchQuery.trim()}“ mit KI schätzen`}
                               </span>
                             </span>
@@ -4158,19 +4184,30 @@ export default function App() {
                               {geminiApiKey.trim() ? 'Gemini' : 'Einrichten'}
                             </span>
                           </button>
-                          <button
-                            type="button"
-                            disabled={isEstimatingAi}
-                            onClick={() => {
-                              if (!geminiApiKey.trim()) openAiSettings();
-                              else aiPhotoInputRef.current?.click();
-                            }}
-                            title="Teller-Foto mit Text-Hinweis schätzen"
-                            aria-label="Teller-Foto mit KI schätzen"
-                            className="h-10 w-10 rounded-xl bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/30 text-sky-300 flex items-center justify-center shrink-0 transition disabled:opacity-60"
-                          >
-                            <Camera className="w-4 h-4" />
-                          </button>
+                          {isEstimatingAi ? (
+                            <button
+                              type="button"
+                              onClick={() => aiAbortRef.current?.abort()}
+                              title="KI-Schätzung abbrechen"
+                              aria-label="KI-Schätzung abbrechen"
+                              className="h-10 w-10 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-300 flex items-center justify-center shrink-0 transition"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (!geminiApiKey.trim()) openAiSettings();
+                                else aiPhotoInputRef.current?.click();
+                              }}
+                              title="Teller-Foto mit Text-Hinweis schätzen"
+                              aria-label="Teller-Foto mit KI schätzen"
+                              className="h-10 w-10 rounded-xl bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/30 text-sky-300 flex items-center justify-center shrink-0 transition"
+                            >
+                              <Camera className="w-4 h-4" />
+                            </button>
+                          )}
                         </div>
                       )}
 

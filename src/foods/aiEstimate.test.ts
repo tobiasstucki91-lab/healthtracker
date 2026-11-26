@@ -34,9 +34,10 @@ test('parseAiEstimatePayload lehnt ungültige oder negative Nährwerte ab', () =
   assert.equal(parseAiEstimatePayload({ caloriesPer100g: 'abc' }), null);
 });
 
-test('rankGeminiFlashModels bevorzugt aktuelle stabile Flash-Lite- und Flash-Modelle', () => {
+test('rankGeminiFlashModels bevorzugt aktuelle stabile Flash-Lite- und Flash-Modelle vor Preview', () => {
   const ranked = rankGeminiFlashModels([
     { name: 'models/gemini-2.5-flash-tts', supportedGenerationMethods: ['generateContent'] },
+    { name: 'models/gemini-3-flash-preview', supportedGenerationMethods: ['generateContent'] },
     { name: 'models/gemini-2.5-flash', supportedGenerationMethods: ['generateContent'] },
     { name: 'models/gemini-2.5-flash-lite', supportedGenerationMethods: ['generateContent'] },
     { name: 'models/gemini-2.0-flash', supportedGenerationMethods: ['generateContent'] },
@@ -48,6 +49,7 @@ test('rankGeminiFlashModels bevorzugt aktuelle stabile Flash-Lite- und Flash-Mod
     'gemini-2.5-flash-lite',
     'gemini-2.5-flash',
     'gemini-2.0-flash',
+    'gemini-3-flash-preview',
   ]);
 });
 
